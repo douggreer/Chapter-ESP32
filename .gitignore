@@ -1,0 +1,13 @@
+build/
+build-*/
+managed_components/
+.idf-tools/
+sdkconfig
+sdkconfig.old
+main/secrets.h
+*.bin
+*.elf
+*.map
+*.coredump
+.DS_Store
+.vscode/
