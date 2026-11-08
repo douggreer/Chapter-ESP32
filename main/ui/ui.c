@@ -25,7 +25,7 @@
 #include "portal.h"
 #include "power.h"
 
-#define UI_MAX_BOOKS 2000
+#define UI_MAX_BOOKS ABS_MAX_LIBRARY_BOOKS
 #define UI_MAX_GROUPS UI_MAX_BOOKS
 #define ROOT_MENU_COUNT 6
 #define SCREEN_SAVER_WORDS 8

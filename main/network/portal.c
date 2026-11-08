@@ -2,6 +2,7 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -28,6 +29,7 @@
 static const char *TAG = "portal";
 
 #define AP_IP "192.168.4.1"
+#define PORTAL_BOOKS_PAGE_SIZE 100
 
 static httpd_handle_t s_httpd;
 static TaskHandle_t s_dns_task, s_apply_task;
@@ -207,11 +209,18 @@ static esp_err_t on_player(httpd_req_t *req)
 
 static esp_err_t on_books(httpd_req_t *req)
 {
-    catalog_web_item_t *books = heap_caps_calloc(2000, sizeof(*books), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    int count = catalog_copy_web_items(books, 2000);
+    size_t offset = 0;
+    char query[64], value[24];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+        httpd_query_key_value(query, "offset", value, sizeof(value)) == ESP_OK) {
+        offset = strtoul(value, NULL, 10);
+    }
+    catalog_web_item_t *books = heap_caps_calloc(PORTAL_BOOKS_PAGE_SIZE, sizeof(*books),
+                                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!books) return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+    int count = catalog_copy_web_items(offset, books, PORTAL_BOOKS_PAGE_SIZE);
     cJSON *array = cJSON_CreateArray();
     for (int i = 0; books && i < count; ++i) {
-        if (books[i].podcast) continue;
         cJSON *book = cJSON_CreateObject();
         cJSON_AddStringToObject(book, "id", books[i].id);
         cJSON_AddStringToObject(book, "title", books[i].title);

@@ -337,7 +337,73 @@ static int book_cmp(const void *pa, const void *pb)
     return text_cmp(a->sort_title, b->sort_title);
 }
 
-esp_err_t abs_parse_books(const char *items_json, const char *me_json, abs_book_t **out_books, int *out_count)
+typedef struct {
+    char item_id[40];
+    char episode_id[40];
+    double current_time;
+    double progress;
+    double last_update;
+    bool finished;
+} abs_progress_entry_t;
+
+static esp_err_t parse_progress(const char *me_json, abs_progress_entry_t **out, int *out_count)
+{
+    *out = NULL;
+    *out_count = 0;
+    if (!me_json) return ESP_OK;
+    cJSON *root = cJSON_Parse(me_json);
+    if (!root) return ESP_FAIL;
+    const cJSON *rows = cJSON_GetObjectItemCaseSensitive(root, "mediaProgress");
+    int count = cJSON_GetArraySize(rows);
+    abs_progress_entry_t *entries = heap_caps_calloc(count ? count : 1, sizeof(*entries), MALLOC_CAP_SPIRAM);
+    if (!entries) {
+        cJSON_Delete(root);
+        return ESP_ERR_NO_MEM;
+    }
+    const cJSON *row;
+    cJSON_ArrayForEach(row, rows) {
+        const char *item = json_str(row, "libraryItemId");
+        if (!item) continue;
+        abs_progress_entry_t *entry = &entries[(*out_count)++];
+        strlcpy(entry->item_id, item, sizeof(entry->item_id));
+        strlcpy(entry->episode_id, json_str(row, "episodeId") ?: "", sizeof(entry->episode_id));
+        entry->current_time = json_num(row, "currentTime");
+        entry->progress = json_num(row, "progress");
+        entry->last_update = json_num(row, "lastUpdate");
+        entry->finished = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(row, "isFinished"));
+    }
+    cJSON_Delete(root);
+    *out = entries;
+    return ESP_OK;
+}
+
+static void apply_progress(abs_book_t *books, int count, const abs_progress_entry_t *entries, int entry_count)
+{
+    for (int p = 0; p < entry_count; ++p) {
+        const abs_progress_entry_t *entry = &entries[p];
+        for (int i = 0; i < count; ++i) {
+            abs_book_t *book = &books[i];
+            if (strcmp(book->id, entry->item_id) != 0) continue;
+            if (!book->podcast && !entry->episode_id[0]) {
+                book->current_time = entry->current_time;
+                book->progress = entry->progress;
+                book->finished = entry->finished;
+                book->last_update = entry->last_update;
+            } else if (book->podcast && entry->episode_id[0] && !entry->finished &&
+                       entry->current_time > 0 && entry->last_update > book->last_update) {
+                // A show is "in progress" through its most recently played unfinished episode.
+                book->current_time = entry->current_time;
+                book->progress = entry->progress;
+                book->last_update = entry->last_update;
+                strlcpy(book->resume_episode, entry->episode_id, sizeof(book->resume_episode));
+            }
+            break;
+        }
+    }
+}
+
+static esp_err_t parse_books_page(const char *items_json, const abs_progress_entry_t *progress,
+                                  int progress_count, abs_book_t **out_books, int *out_count)
 {
     *out_books = NULL;
     *out_count = 0;
@@ -346,6 +412,10 @@ esp_err_t abs_parse_books(const char *items_json, const char *me_json, abs_book_
     const cJSON *results = cJSON_GetObjectItem(root, "results");
     int n = cJSON_GetArraySize(results);
     abs_book_t *books = heap_caps_calloc(n ? n : 1, sizeof(abs_book_t), MALLOC_CAP_SPIRAM);
+    if (!books) {
+        cJSON_Delete(root);
+        return ESP_ERR_NO_MEM;
+    }
     int count = 0;
     const cJSON *it;
     cJSON_ArrayForEach(it, results) {
@@ -377,42 +447,65 @@ esp_err_t abs_parse_books(const char *items_json, const char *me_json, abs_book_
                 b->series_total = (int)json_num(cached_series, "total");
             }
         }
-    }
-    cJSON_Delete(root);
-
-    // Progress lives on the user record: per book, or per episode for podcasts.
-    root = me_json ? cJSON_Parse(me_json) : NULL;
-    const cJSON *p;
-    cJSON_ArrayForEach(p, cJSON_GetObjectItem(root, "mediaProgress")) {
-        const char *item = json_str(p, "libraryItemId");
-        const char *episode = json_str(p, "episodeId");
-        if (!item) continue;
-        for (int i = 0; i < count; i++) {
-            abs_book_t *b = &books[i];
-            if (strcmp(b->id, item) != 0) continue;
-            const bool finished = cJSON_IsTrue(cJSON_GetObjectItem(p, "isFinished"));
-            const double last = json_num(p, "lastUpdate");
-            if (!b->podcast && !episode) {
-                b->current_time = json_num(p, "currentTime");
-                b->progress = json_num(p, "progress");
-                b->finished = finished;
-                b->last_update = last;
-            } else if (b->podcast && episode && !finished && json_num(p, "currentTime") > 0 && last > b->last_update) {
-                // A show is "in progress" through its most recently played unfinished episode.
-                b->current_time = json_num(p, "currentTime");
-                b->progress = json_num(p, "progress");
-                b->last_update = last;
-                strlcpy(b->resume_episode, episode, sizeof(b->resume_episode));
-            }
-            break;
+        const cJSON *cached_progress = cJSON_GetObjectItemCaseSensitive(it, "_chapterProgress");
+        if (cJSON_IsObject(cached_progress)) {
+            b->current_time = json_num(cached_progress, "currentTime");
+            b->progress = (float)json_num(cached_progress, "progress");
+            b->finished = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(cached_progress, "finished"));
+            b->last_update = json_num(cached_progress, "lastUpdate");
+            strlcpy(b->resume_episode, json_str(cached_progress, "episodeId") ?: "",
+                    sizeof(b->resume_episode));
         }
     }
     cJSON_Delete(root);
+
+    apply_progress(books, count, progress, progress_count);
 
     qsort(books, count, sizeof(abs_book_t), book_cmp);
     *out_books = books;
     *out_count = count;
     return ESP_OK;
+}
+
+esp_err_t abs_parse_books(const char *items_json, const char *me_json, abs_book_t **out_books, int *out_count)
+{
+    abs_progress_entry_t *progress = NULL;
+    int progress_count = 0;
+    esp_err_t err = parse_progress(me_json, &progress, &progress_count);
+    if (err == ESP_OK) err = parse_books_page(items_json, progress, progress_count, out_books, out_count);
+    free(progress);
+    return err;
+}
+
+esp_err_t abs_append_books(abs_book_t **books, int *count, int *capacity, abs_book_t *page, int page_count)
+{
+    if (!books || !count || !capacity || page_count < 0 || *count + page_count > ABS_MAX_LIBRARY_BOOKS) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    const int needed = *count + page_count;
+    if (needed > *capacity) {
+        int next = *capacity ? *capacity : ABS_BOOK_PAGE_SIZE;
+        while (next < needed) {
+            if (next >= ABS_MAX_LIBRARY_BOOKS / 2) {
+                next = ABS_MAX_LIBRARY_BOOKS;
+                break;
+            }
+            next *= 2;
+        }
+        abs_book_t *grown = heap_caps_realloc(*books, (size_t)next * sizeof(**books), MALLOC_CAP_SPIRAM);
+        if (!grown) return ESP_ERR_NO_MEM;
+        *books = grown;
+        *capacity = next;
+    }
+    if (page_count) memcpy(*books + *count, page, (size_t)page_count * sizeof(*page));
+    *count = needed;
+    free(page); // The per-page strings moved with their structs into the aggregate.
+    return ESP_OK;
+}
+
+void abs_sort_books(abs_book_t *books, int count)
+{
+    if (books && count > 1) qsort(books, count, sizeof(*books), book_cmp);
 }
 
 esp_err_t abs_parse_libraries(const char *json, abs_library_t **out, int *count)
@@ -585,7 +678,7 @@ static void fill_series_totals(abs_book_t *books, int book_count)
     }
 }
 
-static char *items_json_with_series(const char *items_json, const abs_book_t *books, int book_count)
+char *abs_enrich_books_page(const char *items_json, const abs_book_t *books, int book_count)
 {
     cJSON *root = cJSON_Parse(items_json);
     if (!root) return NULL;
@@ -602,6 +695,13 @@ static char *items_json_with_series(const char *items_json, const abs_book_t *bo
             cJSON_AddStringToObject(series, "sequence", books[i].series_sequence);
             cJSON_AddNumberToObject(series, "total", books[i].series_total);
             cJSON_AddItemToObject(item, "_chapterSeries", series);
+            cJSON *progress = cJSON_CreateObject();
+            cJSON_AddNumberToObject(progress, "currentTime", books[i].current_time);
+            cJSON_AddNumberToObject(progress, "progress", books[i].progress);
+            cJSON_AddBoolToObject(progress, "finished", books[i].finished);
+            cJSON_AddNumberToObject(progress, "lastUpdate", books[i].last_update);
+            cJSON_AddStringToObject(progress, "episodeId", books[i].resume_episode);
+            cJSON_AddItemToObject(item, "_chapterProgress", progress);
             break;
         }
     }
@@ -623,33 +723,81 @@ esp_err_t abs_get_libraries(abs_library_t **out, int *count, char **json)
     return abs_parse_libraries(*json, out, count);
 }
 
-esp_err_t abs_get_books(const char *library_id, abs_book_t **out_books, int *out_count, char **items_json,
-                        char **me_json)
+esp_err_t abs_get_books(const char *library_id, abs_book_t **out_books, int *out_count,
+                        abs_books_page_callback_t page_callback, void *context)
 {
     *out_books = NULL;
     *out_count = 0;
-    *items_json = *me_json = NULL;
-    char path[160];
-    snprintf(path, sizeof(path), "/api/libraries/%s/items?limit=2000&minified=1", library_id);
-    if (request(HTTP_METHOD_GET, path, NULL, items_json) != 200 ||
-        request(HTTP_METHOD_GET, "/api/me", NULL, me_json) != 200) {
-        free(*items_json);
-        free(*me_json);
-        *items_json = *me_json = NULL;
+    abs_progress_entry_t *progress = NULL;
+    int progress_count = 0;
+    char *me_json = NULL;
+    if (request(HTTP_METHOD_GET, "/api/me", NULL, &me_json) != 200 ||
+        parse_progress(me_json, &progress, &progress_count) != ESP_OK) {
+        free(me_json);
+        free(progress);
         return ESP_FAIL;
     }
-    esp_err_t err = abs_parse_books(*items_json, *me_json, out_books, out_count);
-    if (err == ESP_OK && *out_count > 0) {
+
+    free(me_json);
+    int capacity = 0;
+    esp_err_t err = ESP_OK;
+    esp_http_client_handle_t page_conn = NULL;
+    for (int page = 0; page <= ABS_MAX_LIBRARY_BOOKS / ABS_BOOK_PAGE_SIZE; ++page) {
+        char path[192], *page_json = NULL;
+        snprintf(path, sizeof(path), "/api/libraries/%s/items?limit=%d&page=%d&minified=1",
+                 library_id, ABS_BOOK_PAGE_SIZE, page);
+        if (request_len(HTTP_METHOD_GET, path, NULL, &page_json, NULL, &page_conn) != 200 || !page_json) {
+            free(page_json);
+            err = ESP_FAIL;
+            break;
+        }
+        abs_book_t *page_books = NULL;
+        int page_count = 0;
+        err = parse_books_page(page_json, progress, progress_count, &page_books, &page_count);
+        if (err != ESP_OK) {
+            free(page_json);
+            abs_free_books(page_books, page_count);
+            break;
+        }
+        if (page_count == 0) {
+            free(page_json);
+            free(page_books);
+            break;
+        }
+        if (*out_count + page_count > ABS_MAX_LIBRARY_BOOKS) {
+            ESP_LOGE(TAG, "library exceeds the %d-item firmware limit", ABS_MAX_LIBRARY_BOOKS);
+            free(page_json);
+            abs_free_books(page_books, page_count);
+            err = ESP_ERR_INVALID_SIZE;
+            break;
+        }
+        ESP_LOGI(TAG, "library page %d: %d items", page + 1, page_count);
+        if (page_callback && !page_callback(page, page_json, strlen(page_json), context)) {
+            ESP_LOGW(TAG, "could not cache library page %d; continuing with the live library", page);
+        }
+        free(page_json);
+        err = abs_append_books(out_books, out_count, &capacity, page_books, page_count);
+        if (err != ESP_OK) {
+            abs_free_books(page_books, page_count);
+            break;
+        }
+        if (page_count < ABS_BOOK_PAGE_SIZE) break;
+    }
+    if (page_conn) esp_http_client_cleanup(page_conn);
+    free(progress);
+    if (err != ESP_OK) {
+        abs_free_books(*out_books, *out_count);
+        *out_books = NULL;
+        *out_count = 0;
+        return err;
+    }
+    if (*out_count > 0) {
         fetch_series_catalog(library_id, *out_books, *out_count);
         fill_series_totals(*out_books, *out_count);
-        char *enriched = items_json_with_series(*items_json, *out_books, *out_count);
-        if (enriched) {
-            free(*items_json);
-            *items_json = enriched;
-        }
+        abs_sort_books(*out_books, *out_count);
     }
     ESP_LOGI(TAG, "loaded %d items", *out_count);
-    return err;
+    return ESP_OK;
 }
 
 /* ---------- podcast episodes ---------- */

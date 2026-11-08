@@ -3,7 +3,7 @@
 // Which library is shown, and loading it (from the onboard flash cache or the server).
 //
 // The selected library id is kept in NVS. Each library has its own cache directory,
-// STORAGE_ROOT/lib/<library id>/ (items.json, covers/, episodes/), so switching libraries never
+// STORAGE_ROOT/lib/<library id>/ (paged item cache, covers/, episodes/), so switching libraries never
 // overwrites another library's cache. The user record (progress for everything) and the list of
 // libraries are shared: STORAGE_ROOT/me.json and libraries.json.
 //
@@ -50,5 +50,5 @@ typedef struct {
 } catalog_web_item_t;
 
 // Thread-safe snapshots and playback requests used by the local web controls.
-int catalog_copy_web_items(catalog_web_item_t *out, size_t capacity);
+int catalog_copy_web_items(size_t offset, catalog_web_item_t *out, size_t capacity);
 bool catalog_play_book(const char *item_id);
