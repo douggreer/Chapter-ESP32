@@ -1,5 +1,6 @@
 #include "catalog.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,17 +26,22 @@ static int s_lib_count;
 static abs_book_t *s_books;
 static int s_count;
 static SemaphoreHandle_t s_books_lock;
+static SemaphoreHandle_t s_catalog_lock;
+static volatile bool s_account_switch_pending;
 
 /* ---------- selection ---------- */
 
-static void save_selection(void)
+static bool save_selection(void)
 {
     nvs_handle_t h;
-    if (nvs_open("abs", NVS_READWRITE, &h) == ESP_OK) {
-        nvs_set_str(h, "library", s_library);
-        nvs_commit(h);
+    esp_err_t err = nvs_open("abs", NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+        err = nvs_set_str(h, "library", s_library);
+        if (err == ESP_OK) err = nvs_commit(h);
         nvs_close(h);
     }
+    if (err != ESP_OK) ESP_LOGE(TAG, "could not save selected library: %s", esp_err_to_name(err));
+    return err == ESP_OK;
 }
 
 const char *catalog_library_id(void)
@@ -73,7 +79,7 @@ static void ensure_selection(void)
     for (int i = 0; i < s_lib_count; i++) {
         if (!s_libs[i].podcast || i == s_lib_count - 1) {
             strlcpy(s_library, s_libs[i].id, sizeof(s_library));
-            save_selection();
+            (void)save_selection();
             return;
         }
     }
@@ -93,18 +99,29 @@ static void set_libraries(abs_library_t *libs, int n)
 
 void catalog_select(const char *library_id)
 {
+    if (!s_catalog_lock || s_account_switch_pending) return;
+    xSemaphoreTake(s_catalog_lock, portMAX_DELAY);
+    if (s_account_switch_pending) {
+        xSemaphoreGive(s_catalog_lock);
+        return;
+    }
     strlcpy(s_library, library_id, sizeof(s_library));
-    save_selection();
+    (void)save_selection();
     const abs_library_t *l = current();
     abs_set_library_name(l ? l->name : "");
     ui_set_libraries(s_libs, s_lib_count, s_library);
     ESP_LOGI(TAG, "selected library %s", l ? l->name : library_id);
+    xSemaphoreGive(s_catalog_lock);
 }
 
 int catalog_copy_web_items(catalog_web_item_t *out, size_t capacity)
 {
-    if (!out || capacity == 0 || !s_books_lock) return 0;
+    if (!out || capacity == 0 || !s_books_lock || s_account_switch_pending) return 0;
     xSemaphoreTake(s_books_lock, portMAX_DELAY);
+    if (s_account_switch_pending) {
+        xSemaphoreGive(s_books_lock);
+        return 0;
+    }
     int count = s_count < (int)capacity ? s_count : (int)capacity;
     for (int i = 0; i < count; ++i) {
         catalog_web_item_t *dst = &out[i];
@@ -131,9 +148,13 @@ int catalog_copy_web_items(catalog_web_item_t *out, size_t capacity)
 
 bool catalog_play_book(const char *item_id)
 {
-    if (!item_id || !item_id[0] || !s_books_lock) return false;
+    if (!item_id || !item_id[0] || !s_books_lock || s_account_switch_pending) return false;
     bool found = false;
     xSemaphoreTake(s_books_lock, portMAX_DELAY);
+    if (s_account_switch_pending) {
+        xSemaphoreGive(s_books_lock);
+        return false;
+    }
     for (int i = 0; i < s_count; ++i) {
         if (strcmp(s_books[i].id, item_id) != 0 || s_books[i].podcast) continue;
         player_open(&s_books[i]);
@@ -168,7 +189,7 @@ static void migrate(void)
         rename(STORAGE_ROOT "/covers", dst);
         if (!s_library[0]) {
             strlcpy(s_library, id, sizeof(s_library));
-            save_selection();
+            (void)save_selection();
         }
         ESP_LOGI(TAG, "moved the old cache into library %.8s", id);
     } else {
@@ -180,6 +201,7 @@ static void migrate(void)
 void catalog_init(void)
 {
     if (!s_books_lock) s_books_lock = xSemaphoreCreateMutex();
+    if (!s_catalog_lock) s_catalog_lock = xSemaphoreCreateMutex();
     nvs_handle_t h;
     size_t len = sizeof(s_library);
     if (nvs_open("abs", NVS_READONLY, &h) == ESP_OK) {
@@ -194,6 +216,54 @@ void catalog_init(void)
     if (json && abs_parse_libraries(json, &libs, &n) == ESP_OK && n > 0) set_libraries(libs, n);
     else free(libs);
     free(json);
+}
+
+static bool unlink_if_exists(const char *path)
+{
+    if (unlink(path) == 0 || errno == ENOENT) return true;
+    ESP_LOGE(TAG, "could not remove account cache %s (errno %d)", path, errno);
+    return false;
+}
+
+static bool remove_tree_if_exists(const char *path)
+{
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        if (errno == ENOENT) return true;
+        ESP_LOGE(TAG, "could not inspect account cache %s (errno %d)", path, errno);
+        return false;
+    }
+    if (storage_remove_tree(path) == ESP_OK) return true;
+    ESP_LOGE(TAG, "could not remove account cache directory %s", path);
+    return false;
+}
+
+bool catalog_prepare_account_switch(void)
+{
+    if (!s_catalog_lock) return false;
+    xSemaphoreTake(s_catalog_lock, portMAX_DELAY);
+    s_account_switch_pending = true;
+
+    // Clear account-specific progress plus per-library metadata. Offline audio lives in /dl and
+    // is deliberately retained.
+    s_library[0] = 0;
+    bool ok = save_selection();
+    if (storage_ready()) {
+        ok &= unlink_if_exists(ME_JSON);
+        ok &= unlink_if_exists(LIBRARIES_JSON);
+        ok &= unlink_if_exists(STORAGE_ROOT "/items.json");
+        ok &= unlink_if_exists(STORAGE_ROOT "/library.txt");
+        ok &= remove_tree_if_exists(STORAGE_ROOT "/lib");
+        ok &= remove_tree_if_exists(STORAGE_ROOT "/covers");
+    }
+    if (ok) ESP_LOGI(TAG, "cleared cached library and progress for Audiobookshelf account change");
+    xSemaphoreGive(s_catalog_lock);
+    return ok;
+}
+
+void catalog_cancel_account_switch(void)
+{
+    s_account_switch_pending = false;
 }
 
 static void show(abs_book_t *fresh, int n, bool cached)
@@ -212,9 +282,18 @@ static void show(abs_book_t *fresh, int n, bool cached)
 
 bool catalog_load_cached(void)
 {
+    if (!s_catalog_lock) return false;
+    xSemaphoreTake(s_catalog_lock, portMAX_DELAY);
+    if (s_account_switch_pending) {
+        xSemaphoreGive(s_catalog_lock);
+        return false;
+    }
     char dir[96], path[128];
     catalog_dir(dir, sizeof(dir));
-    if (!dir[0]) return false;
+    if (!dir[0]) {
+        xSemaphoreGive(s_catalog_lock);
+        return false;
+    }
     snprintf(path, sizeof(path), "%s/items.json", dir);
     char *items = storage_read_file(path, NULL);
     char *me = storage_read_file(ME_JSON, NULL);
@@ -225,16 +304,24 @@ bool catalog_load_cached(void)
     free(me);
     if (!ok) {
         abs_free_books(fresh, n);
+        xSemaphoreGive(s_catalog_lock);
         return false;
     }
     download_sync_progress(fresh, n, false);
     ESP_LOGI(TAG, "showing %d items of %s from the onboard flash cache", n, abs_library_name());
     show(fresh, n, true);
+    xSemaphoreGive(s_catalog_lock);
     return true;
 }
 
 bool catalog_load_network(bool quiet)
 {
+    if (!s_catalog_lock) return false;
+    xSemaphoreTake(s_catalog_lock, portMAX_DELAY);
+    if (s_account_switch_pending) {
+        xSemaphoreGive(s_catalog_lock);
+        return false;
+    }
     char *json = NULL;
     abs_library_t *libs = NULL;
     int nl = 0;
@@ -242,6 +329,7 @@ bool catalog_load_network(bool quiet)
         free(json);
         free(libs);
         if (!quiet) ui_show_message_locked("Couldn't reach Audiobookshelf.\nTry Refresh in Settings.");
+        xSemaphoreGive(s_catalog_lock);
         return false;
     }
     if (storage_ready()) storage_write_file(LIBRARIES_JSON, json, strlen(json));
@@ -253,6 +341,7 @@ bool catalog_load_network(bool quiet)
     char *items = NULL, *me = NULL;
     if (abs_get_books(s_library, &fresh, &n, &items, &me) != ESP_OK) {
         if (!quiet) ui_show_message_locked("Couldn't load the library.\nTry Refresh in Settings.");
+        xSemaphoreGive(s_catalog_lock);
         return false;
     }
     char dir[96];
@@ -268,5 +357,6 @@ bool catalog_load_network(bool quiet)
     free(me);
     download_sync_progress(fresh, n, true);
     show(fresh, n, false);
+    xSemaphoreGive(s_catalog_lock);
     return true;
 }

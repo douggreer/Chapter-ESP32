@@ -53,7 +53,7 @@ void app_main(void)
         ui_setup_show();
     } else {
         portal_start_station();
-        ui_show_message("Connecting to Audiobookshelf...");
+        ui_show_message("Connecting to Wi-Fi...");
     }
 
     bool cached = catalog_load_cached();

@@ -428,31 +428,44 @@ static void apply(const cJSON *req)
     abs_auth_result_t r;
     const char *mode = str(req, "auth"), *user = str(req, "username"), *pass = str(req, "password");
     const char *key = str(req, "api_key");
-    if (strcmp(mode, "apikey") == 0 && key[0]) {
-        set_status(true, "Checking the API key...");
-        r = abs_check(server, key);
-        if (r == ABS_AUTH_OK) {
-            strlcpy(c->access, key, sizeof(c->access));
-            c->refresh[0] = c->username[0] = 0;
+    if (strcmp(mode, "apikey") == 0) {
+        if (key[0]) {
+            set_status(true, "Checking the API key...");
+            r = abs_check(server, key);
+            if (r == ABS_AUTH_OK) {
+                strlcpy(c->access, key, sizeof(c->access));
+                c->refresh[0] = c->username[0] = 0;
+            }
+        } else if (c->access[0] && !c->username[0] && !c->refresh[0] &&
+                   strcmp(server, c->server) == 0) {
+            set_status(true, "Checking the saved API key...");
+            r = abs_check(server, c->access);
+        } else {
+            set_status(false, "Enter an API key for the new sign-in.");
+            goto out;
         }
-    } else if (strcmp(mode, "password") == 0 && user[0] && pass[0]) {
-        set_status(true, "Signing in as %s...", user);
-        // Never let a refresh token from the previous account survive a successful user switch.
-        c->access[0] = 0;
-        c->refresh[0] = 0;
-        r = abs_login(server, user, pass, c->access, sizeof(c->access), c->refresh, sizeof(c->refresh));
-        if (r == ABS_AUTH_OK) strlcpy(c->username, user, sizeof(c->username));
-    } else if (strcmp(mode, "password") == 0 && user[0] &&
-               strcmp(user, c->username) != 0) {
-        set_status(false, "Enter the password for the new Audiobookshelf user.");
-        goto out;
-    } else if (c->access[0] && strcmp(server, c->server) == 0) {
-        set_status(true, "Checking the saved sign-in...");
-        r = abs_check(server, c->access);
-        // An expired access token with a refresh token is fine: it renews on first use.
-        if (r == ABS_AUTH_REJECTED && c->refresh[0]) r = ABS_AUTH_OK;
+    } else if (strcmp(mode, "password") == 0) {
+        if (user[0] && pass[0]) {
+            set_status(true, "Signing in as %s...", user);
+            // Never let a refresh token from the previous account survive a successful user switch.
+            c->access[0] = 0;
+            c->refresh[0] = 0;
+            r = abs_login(server, user, pass, c->access, sizeof(c->access), c->refresh, sizeof(c->refresh));
+            if (r == ABS_AUTH_OK) strlcpy(c->username, user, sizeof(c->username));
+        } else if (c->access[0] && c->username[0] && strcmp(user, c->username) == 0 &&
+                   strcmp(server, c->server) == 0) {
+            set_status(true, "Checking the saved sign-in...");
+            r = abs_check(server, c->access);
+            // An expired access token with a refresh token is fine: it renews on first use.
+            if (r == ABS_AUTH_REJECTED && c->refresh[0]) r = ABS_AUTH_OK;
+        } else {
+            set_status(false, user[0] && strcmp(user, c->username) != 0
+                                  ? "Enter the password for the new Audiobookshelf user."
+                                  : "Enter your username and password.");
+            goto out;
+        }
     } else {
-        set_status(false, strcmp(mode, "apikey") == 0 ? "Enter an API key." : "Enter your username and password.");
+        set_status(false, "Choose username/password or API key sign-in.");
         goto out;
     }
     if (r != ABS_AUTH_OK) {
@@ -498,6 +511,10 @@ static void apply(const cJSON *req)
         }
     }
 
+    const bool account_changed = strcmp(previous_config->server, c->server) != 0 ||
+                                 strcmp(previous_config->username, c->username) != 0 ||
+                                 ((!previous_config->username[0] || !c->username[0]) &&
+                                  strcmp(previous_config->access, c->access) != 0);
     const bool connection_changed = strcmp(previous_config->wifi_ssid, c->wifi_ssid) != 0 ||
                                     strcmp(previous_config->wifi_pass, c->wifi_pass) != 0 ||
                                     strcmp(previous_config->server, c->server) != 0 ||
@@ -505,15 +522,23 @@ static void apply(const cJSON *req)
                                     strcmp(previous_config->access, c->access) != 0 ||
                                     strcmp(previous_config->refresh, c->refresh) != 0;
     const bool display_changed = previous_config->display_type != c->display_type;
+    if (account_changed && !catalog_prepare_account_switch()) {
+        catalog_cancel_account_switch();
+        set_status(false, "Account was not changed because the old library cache could not be cleared.");
+        goto out;
+    }
     if (!config_save(c)) {
+        if (account_changed) catalog_cancel_account_switch();
         set_status(false, "Settings could not be saved to device storage. No restart was made.");
         goto out;
     }
     player_set_playback_speed(c->playback_speed_pct);
     if (connection_changed || display_changed) {
-        set_status(true, display_changed
-                             ? "All set. Restarting to apply the display change..."
-                             : "All set. Restarting to apply connection changes...");
+        set_status(true, account_changed
+                             ? "Account changed. Restarting to load its library..."
+                             : display_changed
+                                   ? "All set. Restarting to apply the display change..."
+                                   : "All set. Restarting to apply connection changes...");
         vTaskDelay(pdMS_TO_TICKS(2500));  // let the page show it
         esp_restart();
     }

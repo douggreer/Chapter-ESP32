@@ -15,6 +15,11 @@
 
 void catalog_init(void);
 
+// Clear account-scoped library/progress caches and forget the selected library before a sign-in
+// change. While the restart is pending, don't reload the previous account's catalog.
+bool catalog_prepare_account_switch(void);
+void catalog_cancel_account_switch(void);
+
 // Currently selected library ("" until known) and its cache directory ("" if flash storage is unavailable).
 const char *catalog_library_id(void);
 bool catalog_library_is_podcast(void);

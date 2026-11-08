@@ -35,6 +35,8 @@ This is a project-level summary of the work done to create and refine the ESP32-
 - Added device status, remote play/pause/stop, seeking, chapter changes, volume, library browsing and playback, manual library refresh, and a recent list specific to this device.
 - Added deep sleep after the idle timeout with Wi-Fi, OLED, and amplifier shutdown; knob input wakes the ESP32.
 - Hardened account changes: switching usernames requires the new password, the prior refresh token is cleared after a successful new sign-in, and the ESP32 only restarts after settings are confirmed written to flash.
+- Account switches clear cached account progress, library listings, and metadata before restarting, so books and Continue Listening from the previous sign-in cannot be mistaken for the new account's library. Offline audio downloads are retained.
+- The portal now rejects an empty API key when switching from another sign-in type instead of silently validating and keeping the prior credentials.
 - When cached library data exists, it is shown immediately while the firmware reconnects to Audiobookshelf instead of leaving a Wi-Fi connection message over the display.
 
 ## Current known limits
