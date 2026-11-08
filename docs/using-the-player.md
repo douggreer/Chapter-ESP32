@@ -20,7 +20,7 @@ The configurable acceleration multiplier applies when the time between encoder s
 
 ## Browse menus
 
-- **Continue Listening** contains unfinished books from the signed-in Audiobookshelf user's progress and sorts by latest activity.
+- **Continue Listening** contains up to the 50 most recently active unfinished books from the signed-in Audiobookshelf user's progress.
 - **Browse by Series** lists primary series names and book counts. Selecting a series lists its books in series order where metadata provides a sequence. The series book number appears in this view.
 - **Browse by Title** shows plain book titles in the selected library's title order.
 - **Browse by Author** groups books by author and shows the count.

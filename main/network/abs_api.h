@@ -34,6 +34,9 @@ typedef struct {
     char resume_episode[40];
 } abs_book_t;
 
+typedef void (*abs_work_callback_t)(void);
+void abs_set_work_callback(abs_work_callback_t callback);
+
 typedef struct {
     char id[40];
     char name[64];

@@ -17,7 +17,7 @@ The board, audio, Wi-Fi portal, and both display options have been brought up on
 ## Features
 
 - Audiobookshelf sign-in using username/password or API key, token refresh, library caching, streamed playback, and progress sync. Libraries up to 7,000 items are downloaded in 250-item pages and cached as compact Chapter metadata.
-- Continue Listening lists unfinished books by most recent activity. Browse by Series uses each book's primary series; Browse by Title shows the plain title; Browse by Author groups books by author.
+- Continue Listening lists up to the 50 most recently active unfinished books. Browse by Series uses each book's primary series; Browse by Title shows the plain title; Browse by Author groups books by author.
 - A two-knob interface with configurable fast-turn acceleration, one-second configurable holds, series book numbers in the series list, and consistent-speed marquee scrolling.
 - Volume knob click toggles play/pause and returns to playback. Select-knob hold goes back one level; volume-knob hold returns to the root menu. Holding both knobs anywhere starts clean shutdown into deep sleep.
 - Web portal with device status, remote playback and chapter controls, library browsing and playback, a device-only recent list, manual library refresh, and one save action for settings.

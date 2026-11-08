@@ -27,6 +27,7 @@
 
 #define UI_MAX_BOOKS ABS_MAX_LIBRARY_BOOKS
 #define UI_MAX_GROUPS UI_MAX_BOOKS
+#define UI_CONTINUE_LIMIT 50
 #define ROOT_MENU_COUNT 6
 #define SCREEN_SAVER_WORDS 8
 #define DISPLAY_LABEL_COUNT 4
@@ -58,7 +59,7 @@ static uint8_t *s_lvgl_buffer;
 static bool s_ready;
 static const abs_book_t *s_books;
 static int s_book_count;
-static int s_visible[UI_MAX_BOOKS];
+static int *s_visible;
 static int s_visible_count;
 static group_entry_t *s_groups;
 static int s_group_count;
@@ -498,8 +499,18 @@ static void build_continue_items(void)
         if (!s_books[i].podcast && book_in_progress(&s_books[i])) s_visible[s_visible_count++] = i;
     }
     qsort(s_visible, s_visible_count, sizeof(s_visible[0]), visible_continue_cmp);
+    if (s_visible_count > UI_CONTINUE_LIMIT) s_visible_count = UI_CONTINUE_LIMIT;
     if (s_item_selection >= s_visible_count) s_item_selection = s_visible_count - 1;
     if (s_item_selection < 0) s_item_selection = 0;
+}
+
+static int find_group(const char *name)
+{
+    if (!name || !name[0]) return -1;
+    for (int i = 0; i < s_group_count; ++i) {
+        if (strcasecmp(s_groups[i].name, name) == 0) return i;
+    }
+    return -1;
 }
 
 static void change_selection(int *selection, int count, int delta)
@@ -1119,9 +1130,16 @@ static void render_screen(void)
 
 void ui_init(void)
 {
+    s_visible = heap_caps_calloc(UI_MAX_BOOKS, sizeof(*s_visible), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_visible) {
+        ESP_LOGE(TAG, "unable to allocate the navigation list in PSRAM");
+        return;
+    }
     s_groups = heap_caps_calloc(UI_MAX_GROUPS, sizeof(*s_groups), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!s_groups) {
         ESP_LOGE(TAG, "unable to allocate the browse index in PSRAM");
+        free(s_visible);
+        s_visible = NULL;
         return;
     }
     if (chapter_display_init() != ESP_OK) return;
@@ -1300,12 +1318,44 @@ void ui_show_player(void)
 
 void ui_set_books(const abs_book_t *books, int count)
 {
+    if (!s_visible) {
+        s_books = books;
+        s_book_count = count > UI_MAX_BOOKS ? UI_MAX_BOOKS : count;
+        return;
+    }
+    char previous_group[128] = "";
+    const bool was_in_group = s_screen == UI_BOOKS && s_list_kind != LIST_TITLE;
+    if ((s_screen == UI_GROUPS || was_in_group) && s_group_selection >= 0 &&
+        s_group_selection < s_group_count) {
+        strlcpy(previous_group, s_groups[s_group_selection].name, sizeof(previous_group));
+    }
+    const int previous_group_selection = s_group_selection;
+
     s_books = books;
     s_book_count = count > UI_MAX_BOOKS ? UI_MAX_BOOKS : count;
-    s_root_selection = 0;
-    s_item_selection = 0;
     s_group_count = 0;
-    build_continue_items();
+
+    if (s_screen == UI_CONTINUE) {
+        build_continue_items();
+    } else if (s_screen == UI_GROUPS) {
+        build_groups(s_group_kind);
+        s_group_selection = previous_group_selection < s_group_count
+                                ? previous_group_selection : s_group_count - 1;
+        const int found = find_group(previous_group);
+        if (found >= 0) s_group_selection = found;
+        if (s_group_selection < 0) s_group_selection = 0;
+    } else if (s_screen == UI_BOOKS) {
+        if (s_list_kind != LIST_TITLE) {
+            build_groups(s_group_kind);
+            s_selected_group = find_group(previous_group);
+            if (s_selected_group < 0 && s_group_count > 0) s_selected_group = 0;
+            if (s_selected_group >= 0) s_group_selection = s_selected_group;
+        }
+        build_visible_items();
+    } else {
+        s_group_selection = 0;
+    }
+
     ++s_library_revision;
     if (!s_library_revision) ++s_library_revision;
     const app_config_t *cfg = config_get();

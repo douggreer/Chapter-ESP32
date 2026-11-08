@@ -39,6 +39,7 @@ This is a project-level summary of the work done to create and refine the ESP32-
 - The portal now rejects an empty API key when switching from another sign-in type instead of silently validating and keeping the prior credentials.
 - When cached library data exists, it is shown immediately while the firmware reconnects to Audiobookshelf instead of leaving a Wi-Fi connection message over the display.
 - Added compact metadata caching and paginated library loading for catalogs up to 7,000 items. Portal browsing is paginated too, keeping each HTTP response and web-server allocation small.
+- Continue Listening is limited to the 50 most recently active unfinished books. Large-library refreshes now keep the cached menus responsive, use smaller series pages, and log the compact-cache write duration.
 
 ## Current known limits
 

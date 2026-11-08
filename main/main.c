@@ -18,7 +18,7 @@
 #include "ui.h"
 #include "wifi.h"
 
-#define RETRY_US (30 * 1000000LL)
+#define RETRY_US (60 * 1000000LL)
 
 static const char *TAG = "chapter_main";
 
@@ -57,8 +57,7 @@ void app_main(void)
     }
 
     bool cached = catalog_load_cached();
-    // A saved catalog is immediately usable. Don't leave a Wi-Fi/connectivity splash over it while
-    // the background Audiobookshelf refresh is attempted.
+    // A saved catalog is immediately usable. Clear the Wi-Fi splash before refreshing it.
     if (cached) ui_show_message(NULL);
     bool online = false;
     bool first_network_load = true;
@@ -69,10 +68,10 @@ void app_main(void)
     for (;;) {
         const int64_t now = esp_timer_get_time();
         if (config_complete() && !online && wifi_is_connected() && now - last_try >= RETRY_US) {
-            ui_show_message(cached ? "Refreshing Audiobookshelf library..."
-                                   : "Loading Audiobookshelf library...");
+            // Keep the cached menu visible and usable while it refreshes.
+            if (!cached) ui_show_message("Loading Audiobookshelf library...");
             online = catalog_load_network(cached);
-            last_try = now;
+            last_try = esp_timer_get_time();
             if (online) {
                 if (first_network_load) {
                     first_network_load = false;
@@ -95,7 +94,7 @@ void app_main(void)
             cached = catalog_load_cached();
             if (wifi_is_connected()) {
                 online = catalog_load_network(cached);
-                last_try = now;
+                last_try = esp_timer_get_time();
             } else if (!cached) {
                 catalog_select(previous);
                 ui_show_message("That library is not cached.\nConnect to Wi-Fi first.");
@@ -105,7 +104,7 @@ void app_main(void)
         if (ui_take_refresh_request()) {
             if (wifi_is_connected()) {
                 online = catalog_load_network(false);
-                last_try = now;
+                last_try = esp_timer_get_time();
                 if (online) ui_show_message(NULL);
             } else {
                 ui_show_message("Offline - showing saved library");

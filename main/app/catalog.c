@@ -12,8 +12,10 @@
 #include "freertos/semphr.h"
 #include "esp_log.h"
 #include "esp_random.h"
+#include "esp_timer.h"
 #include "nvs.h"
 #include "player.h"
+#include "power.h"
 #include "storage.h"
 #include "ui.h"
 
@@ -23,6 +25,14 @@ static const char *TAG = "catalog";
 #define ME_JSON        STORAGE_ROOT "/me.json"
 
 static void clean_item_cache_for_boot(const char *dir);
+
+static void pump_catalog_ui(void)
+{
+    ui_process();
+    // A manual refresh requested during this load is already being fulfilled.
+    (void)ui_take_refresh_request();
+    if (ui_take_shutdown_request()) power_shutdown_now();
+}
 
 static char s_library[40];
 static abs_library_t *s_libs;
@@ -316,6 +326,7 @@ static void remove_old_item_pages(const char *dir, uint32_t keep_generation, boo
 static bool finish_book_cache(book_cache_writer_t *writer, const abs_book_t *books, int count)
 {
     if (!storage_ready()) return false;
+    const int64_t started = esp_timer_get_time();
     const int pages = (count + ABS_BOOK_PAGE_SIZE - 1) / ABS_BOOK_PAGE_SIZE;
     for (int page = 0; page < pages; ++page) {
         char path[160];
@@ -331,6 +342,7 @@ static bool finish_book_cache(book_cache_writer_t *writer, const abs_book_t *boo
             return false;
         }
         free(json);
+        pump_catalog_ui();
     }
     char index_path[128], manifest[96];
     snprintf(index_path, sizeof(index_path), "%s/items-index.txt", writer->dir);
@@ -341,6 +353,8 @@ static bool finish_book_cache(book_cache_writer_t *writer, const abs_book_t *boo
     snprintf(legacy_path, sizeof(legacy_path), "%s/items.json", writer->dir);
     unlink(legacy_path);
     remove_old_item_pages(writer->dir, writer->generation, true);
+    ESP_LOGI(TAG, "cached %d items in %d compact pages (%lld ms)",
+             count, pages, (long long)((esp_timer_get_time() - started) / 1000));
     return true;
 }
 
@@ -468,17 +482,20 @@ bool catalog_load_network(bool quiet)
         (void)storage_mkdirs(dir);
         clean_item_cache_for_boot(dir);
     }
-    if (abs_get_books(s_library, &fresh, &n) != ESP_OK) {
+    abs_set_work_callback(pump_catalog_ui);
+    const esp_err_t fetch_error = abs_get_books(s_library, &fresh, &n);
+    abs_set_work_callback(NULL);
+    if (fetch_error != ESP_OK) {
         abs_free_books(fresh, n);
         if (!quiet) ui_show_message_locked("Couldn't load the library.\nTry Refresh in Settings.");
         xSemaphoreGive(s_catalog_lock);
         return false;
     }
+    download_sync_progress(fresh, n, true);
+    show(fresh, n, false);
     if (dir[0] && !finish_book_cache(&writer, fresh, n)) {
         ESP_LOGW(TAG, "library loaded, but the refreshed offline cache was not committed");
     }
-    download_sync_progress(fresh, n, true);
-    show(fresh, n, false);
     xSemaphoreGive(s_catalog_lock);
     return true;
 }

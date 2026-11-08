@@ -35,6 +35,17 @@ static char s_device_id_dl[28];
 struct abs_stream {
     esp_http_client_handle_t client;
 };
+static abs_work_callback_t s_work_callback;
+
+void abs_set_work_callback(abs_work_callback_t callback)
+{
+    s_work_callback = callback;
+}
+
+static void yield_work(void)
+{
+    if (s_work_callback) s_work_callback();
+}
 
 // Library listings are hundreds of KB of JSON; keep cJSON's many small nodes out of internal RAM.
 static void *psram_malloc(size_t n)
@@ -523,53 +534,118 @@ void abs_sort_books(abs_book_t *books, int count)
     if (books && count > 1) qsort(books, count, sizeof(*books), book_cmp);
 }
 
+typedef struct {
+    char *data;
+    size_t length;
+    size_t capacity;
+} cache_json_writer_t;
+
+static bool cache_reserve(cache_json_writer_t *writer, size_t extra)
+{
+    if (extra > SIZE_MAX - writer->length - 1) return false;
+    const size_t needed = writer->length + extra + 1;
+    if (needed <= writer->capacity) return true;
+    size_t capacity = writer->capacity ? writer->capacity : 16384;
+    while (capacity < needed) {
+        if (capacity > SIZE_MAX / 2) { capacity = needed; break; }
+        capacity *= 2;
+    }
+    char *grown = writer->data
+        ? heap_caps_realloc(writer->data, capacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+        : heap_caps_malloc(capacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!grown) return false;
+    writer->data = grown;
+    writer->capacity = capacity;
+    return true;
+}
+
+static bool cache_append_n(cache_json_writer_t *writer, const char *value, size_t length)
+{
+    if (!cache_reserve(writer, length)) return false;
+    memcpy(writer->data + writer->length, value, length);
+    writer->length += length;
+    writer->data[writer->length] = 0;
+    return true;
+}
+
+static bool cache_append(cache_json_writer_t *writer, const char *value)
+{
+    return cache_append_n(writer, value, strlen(value));
+}
+
+static bool cache_append_string(cache_json_writer_t *writer, const char *value)
+{
+    if (!cache_append(writer, "\"")) return false;
+    const unsigned char *p = (const unsigned char *)(value ? value : "");
+    for (; *p; ++p) {
+        char escaped[7];
+        const char *out = (const char *)p;
+        size_t length = 1;
+        switch (*p) {
+        case '"': out = "\\\""; length = 2; break;
+        case '\\': out = "\\\\"; length = 2; break;
+        case '\b': out = "\\b"; length = 2; break;
+        case '\f': out = "\\f"; length = 2; break;
+        case '\n': out = "\\n"; length = 2; break;
+        case '\r': out = "\\r"; length = 2; break;
+        case '\t': out = "\\t"; length = 2; break;
+        default:
+            if (*p < 0x20) {
+                snprintf(escaped, sizeof(escaped), "\\u%04x", *p);
+                out = escaped;
+                length = 6;
+            }
+            break;
+        }
+        if (!cache_append_n(writer, out, length)) return false;
+    }
+    return cache_append(writer, "\"");
+}
+
+static bool cache_append_number(cache_json_writer_t *writer, const char *format, double value)
+{
+    char number[32];
+    const int length = snprintf(number, sizeof(number), format, value);
+    return length > 0 && (size_t)length < sizeof(number) && cache_append_n(writer, number, (size_t)length);
+}
+
 char *abs_books_cache_json(const abs_book_t *books, int count)
 {
-    cJSON *root = cJSON_CreateObject();
-    cJSON *items = cJSON_CreateArray();
-    if (!root || !items) {
-        cJSON_Delete(root);
-        cJSON_Delete(items);
+    cache_json_writer_t writer = {0};
+    bool ok = cache_append(&writer, "{\"v\":2,\"b\":[");
+    for (int i = 0; ok && i < count; ++i) {
+        const abs_book_t *book = &books[i];
+        if (i) ok = cache_append(&writer, ",");
+        ok = ok && cache_append(&writer, "{\"i\":") && cache_append_string(&writer, book->id) &&
+             cache_append(&writer, ",\"t\":") && cache_append_string(&writer, book->title ? book->title : "Untitled") &&
+             cache_append(&writer, ",\"s\":") && cache_append_string(&writer, book->sort_title ? book->sort_title : "") &&
+             cache_append(&writer, ",\"a\":") && cache_append_string(&writer, book->author ? book->author : "") &&
+             cache_append(&writer, ",\"A\":[");
+        for (int a = 0; ok && a < book->author_count; ++a) {
+            if (a) ok = cache_append(&writer, ",");
+            ok = ok && cache_append_string(&writer, book->authors[a] ? book->authors[a] : "");
+        }
+        ok = ok && cache_append(&writer, "],\"S\":") && cache_append_string(&writer, book->series_name) &&
+             cache_append(&writer, ",\"I\":") && cache_append_string(&writer, book->series_id) &&
+             cache_append(&writer, ",\"q\":") && cache_append_string(&writer, book->series_sequence) &&
+             cache_append(&writer, ",\"N\":") && cache_append_number(&writer, "%.0f", book->series_total) &&
+             cache_append(&writer, ",\"d\":") && cache_append_number(&writer, "%.15g", book->duration) &&
+             cache_append(&writer, ",\"c\":") && cache_append_number(&writer, "%.15g", book->current_time) &&
+             cache_append(&writer, ",\"p\":") && cache_append_number(&writer, "%.8g", book->progress) &&
+             cache_append(&writer, book->finished ? ",\"f\":true" : ",\"f\":false") &&
+             cache_append(&writer, ",\"u\":") && cache_append_number(&writer, "%.15g", book->last_update) &&
+             cache_append(&writer, ",\"x\":") && cache_append_number(&writer, "%.15g", book->added_at) &&
+             cache_append(&writer, book->podcast ? ",\"P\":true" : ",\"P\":false") &&
+             cache_append(&writer, ",\"e\":") && cache_append_number(&writer, "%.0f", book->num_episodes) &&
+             cache_append(&writer, ",\"r\":") && cache_append_string(&writer, book->resume_episode) &&
+             cache_append(&writer, "}");
+    }
+    ok = ok && cache_append(&writer, "]}");
+    if (!ok) {
+        free(writer.data);
         return NULL;
     }
-    cJSON_AddNumberToObject(root, "v", 2);
-    cJSON_AddItemToObject(root, "b", items);
-    for (int i = 0; i < count; ++i) {
-        const abs_book_t *book = &books[i];
-        cJSON *item = cJSON_CreateObject();
-        cJSON *authors = cJSON_CreateArray();
-        if (!item || !authors) {
-            cJSON_Delete(item);
-            cJSON_Delete(authors);
-            cJSON_Delete(root);
-            return NULL;
-        }
-        cJSON_AddStringToObject(item, "i", book->id);
-        cJSON_AddStringToObject(item, "t", book->title ? book->title : "Untitled");
-        cJSON_AddStringToObject(item, "s", book->sort_title ? book->sort_title : "");
-        cJSON_AddStringToObject(item, "a", book->author ? book->author : "");
-        for (int a = 0; a < book->author_count; ++a) {
-            cJSON_AddItemToArray(authors, cJSON_CreateString(book->authors[a] ? book->authors[a] : ""));
-        }
-        cJSON_AddItemToObject(item, "A", authors);
-        cJSON_AddStringToObject(item, "S", book->series_name);
-        cJSON_AddStringToObject(item, "I", book->series_id);
-        cJSON_AddStringToObject(item, "q", book->series_sequence);
-        cJSON_AddNumberToObject(item, "N", book->series_total);
-        cJSON_AddNumberToObject(item, "d", book->duration);
-        cJSON_AddNumberToObject(item, "c", book->current_time);
-        cJSON_AddNumberToObject(item, "p", book->progress);
-        cJSON_AddBoolToObject(item, "f", book->finished);
-        cJSON_AddNumberToObject(item, "u", book->last_update);
-        cJSON_AddNumberToObject(item, "x", book->added_at);
-        cJSON_AddBoolToObject(item, "P", book->podcast);
-        cJSON_AddNumberToObject(item, "e", book->num_episodes);
-        cJSON_AddStringToObject(item, "r", book->resume_episode);
-        cJSON_AddItemToArray(items, item);
-    }
-    char *json = cJSON_PrintUnformatted(root);
-    cJSON_Delete(root);
-    return json;
+    return writer.data;
 }
 
 esp_err_t abs_parse_cached_books(const char *json, abs_book_t **out_books, int *out_count)
@@ -766,7 +842,9 @@ static void merge_series_row(const cJSON *row, abs_book_t *books, book_id_ref_t 
 
 static void fetch_series_catalog(const char *library_id, abs_book_t *books, int book_count)
 {
-    enum { SERIES_PAGE_SIZE = 250 };
+    // Series pages include member records, so keep them smaller than item pages to avoid a
+    // multi-megabyte response when a library has thousands of books.
+    enum { SERIES_PAGE_SIZE = 25 };
     book_id_ref_t *refs = heap_caps_malloc((size_t)(book_count ? book_count : 1) * sizeof(*refs),
                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!refs) {
@@ -778,13 +856,14 @@ static void fetch_series_catalog(const char *library_id, abs_book_t *books, int 
 
     // Read all series pages, reusing the HTTP connection and matching each member by ID.
     esp_http_client_handle_t connection = NULL;
-    for (int page = 0; page < 100; ++page) {
+    int series_count = 0;
+    for (int page = 0; page <= ABS_MAX_LIBRARY_BOOKS / SERIES_PAGE_SIZE; ++page) {
         char path[160], *json = NULL;
         snprintf(path, sizeof(path), "/api/libraries/%s/series?limit=%d&page=%d",
                  library_id, SERIES_PAGE_SIZE, page);
         if (request_len(HTTP_METHOD_GET, path, NULL, &json, NULL, &connection) != 200 || !json) {
             free(json);
-            if (page == 0) ESP_LOGW(TAG, "series endpoint unavailable; using item metadata");
+            ESP_LOGW(TAG, "series page %d unavailable; using item metadata for remaining books", page + 1);
             break;
         }
         cJSON *root = cJSON_Parse(json);
@@ -797,8 +876,11 @@ static void fetch_series_catalog(const char *library_id, abs_book_t *books, int 
         const cJSON *row;
         cJSON_ArrayForEach(row, rows) merge_series_row(row, books, refs, book_count);
         cJSON_Delete(root);
+        series_count += count;
+        yield_work();
         if (!count || (count < SERIES_PAGE_SIZE && (!total || (page + 1) * SERIES_PAGE_SIZE >= total))) break;
     }
+    ESP_LOGI(TAG, "series catalog: reconciled %d series rows", series_count);
     if (connection) esp_http_client_cleanup(connection);
     free(refs);
 }
@@ -886,8 +968,10 @@ esp_err_t abs_get_books(const char *library_id, abs_book_t **out_books, int *out
         char path[192], *page_json = NULL;
         snprintf(path, sizeof(path), "/api/libraries/%s/items?limit=%d&page=%d&minified=1",
                  library_id, ABS_BOOK_PAGE_SIZE, page);
-        if (request_len(HTTP_METHOD_GET, path, NULL, &page_json, NULL, &page_conn) != 200 || !page_json) {
+        const int status = request_len(HTTP_METHOD_GET, path, NULL, &page_json, NULL, &page_conn);
+        if (status != 200 || !page_json) {
             free(page_json);
+            ESP_LOGW(TAG, "library page %d request failed (HTTP %d)", page + 1, status);
             err = ESP_FAIL;
             break;
         }
@@ -897,11 +981,13 @@ esp_err_t abs_get_books(const char *library_id, abs_book_t **out_books, int *out
         if (err != ESP_OK) {
             free(page_json);
             abs_free_books(page_books, page_count);
+            ESP_LOGW(TAG, "library page %d could not be parsed: %s", page + 1, esp_err_to_name(err));
             break;
         }
         if (page_count == 0) {
             free(page_json);
             free(page_books);
+            yield_work();
             break;
         }
         if (*out_count + page_count > ABS_MAX_LIBRARY_BOOKS) {
@@ -918,6 +1004,7 @@ esp_err_t abs_get_books(const char *library_id, abs_book_t **out_books, int *out
             abs_free_books(page_books, page_count);
             break;
         }
+        yield_work();
         if (page_count < ABS_BOOK_PAGE_SIZE) break;
     }
     if (page_conn) esp_http_client_cleanup(page_conn);
