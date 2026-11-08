@@ -38,7 +38,7 @@ This is a project-level summary of the work done to create and refine the ESP32-
 - Account switches clear cached account progress, library listings, and metadata before restarting, so books and Continue Listening from the previous sign-in cannot be mistaken for the new account's library. Offline audio downloads are retained.
 - The portal now rejects an empty API key when switching from another sign-in type instead of silently validating and keeping the prior credentials.
 - When cached library data exists, it is shown immediately while the firmware reconnects to Audiobookshelf instead of leaving a Wi-Fi connection message over the display.
-- Added paginated library loading and cache files for libraries up to 5,000 items, and paginated portal browsing so large catalogs do not require one oversized HTTP response or web-server allocation.
+- Added compact metadata caching and paginated library loading for catalogs up to 7,000 items. Portal browsing is paginated too, keeping each HTTP response and web-server allocation small.
 
 ## Current known limits
 

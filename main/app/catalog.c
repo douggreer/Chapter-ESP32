@@ -11,7 +11,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "esp_log.h"
-#include "esp_timer.h"
+#include "esp_random.h"
 #include "nvs.h"
 #include "player.h"
 #include "storage.h"
@@ -21,6 +21,8 @@ static const char *TAG = "catalog";
 
 #define LIBRARIES_JSON STORAGE_ROOT "/libraries.json"
 #define ME_JSON        STORAGE_ROOT "/me.json"
+
+static void clean_item_cache_for_boot(const char *dir);
 
 static char s_library[40];
 static abs_library_t *s_libs;
@@ -136,7 +138,9 @@ int catalog_copy_web_items(size_t offset, catalog_web_item_t *out, size_t capaci
         strlcpy(dst->sort_title, src->sort_title ? src->sort_title : dst->title, sizeof(dst->sort_title));
         strlcpy(dst->author, src->author ? src->author : "", sizeof(dst->author));
         dst->author_count = src->author_count;
-        memcpy(dst->authors, src->authors, sizeof(dst->authors));
+        for (int a = 0; a < src->author_count; ++a) {
+            strlcpy(dst->authors[a], src->authors[a] ? src->authors[a] : "", sizeof(dst->authors[a]));
+        }
         strlcpy(dst->series, src->series_name, sizeof(dst->series));
         strlcpy(dst->series_sequence, src->series_sequence, sizeof(dst->series_sequence));
         dst->series_total = src->series_total;
@@ -221,6 +225,9 @@ void catalog_init(void)
     if (json && abs_parse_libraries(json, &libs, &n) == ESP_OK && n > 0) set_libraries(libs, n);
     else free(libs);
     free(json);
+    char dir[96];
+    catalog_dir(dir, sizeof(dir));
+    if (dir[0]) clean_item_cache_for_boot(dir);
 }
 
 static bool unlink_if_exists(const char *path)
@@ -288,26 +295,9 @@ static void show(abs_book_t *fresh, int n, bool cached)
 typedef struct {
     char dir[96];
     uint32_t generation;
-    int pages;
-    bool failed;
 } book_cache_writer_t;
 
-static bool cache_book_page(int page, const char *json, size_t len, void *context)
-{
-    book_cache_writer_t *writer = context;
-    char path[160];
-    snprintf(path, sizeof(path), "%s/items-%08lx-%03d.json", writer->dir,
-             (unsigned long)writer->generation, page);
-    if (storage_write_file(path, json, len) != ESP_OK) {
-        writer->failed = true;
-        ESP_LOGW(TAG, "could not write library cache page %d", page);
-        return false;
-    }
-    writer->pages = page + 1;
-    return true;
-}
-
-static void remove_old_item_pages(const char *dir, uint32_t keep_generation)
+static void remove_old_item_pages(const char *dir, uint32_t keep_generation, bool keep_generation_files)
 {
     DIR *directory = opendir(dir);
     if (!directory) return;
@@ -317,7 +307,7 @@ static void remove_old_item_pages(const char *dir, uint32_t keep_generation)
     char path[160];
     while ((entry = readdir(directory))) {
         if (strncmp(entry->d_name, "items-", 6) != 0 || !strstr(entry->d_name, ".json")) continue;
-        if (strncmp(entry->d_name, keep_prefix, strlen(keep_prefix)) == 0) continue;
+        if (keep_generation_files && strncmp(entry->d_name, keep_prefix, strlen(keep_prefix)) == 0) continue;
         if (snprintf(path, sizeof(path), "%s/%s", dir, entry->d_name) < (int)sizeof(path)) unlink(path);
     }
     closedir(directory);
@@ -325,31 +315,47 @@ static void remove_old_item_pages(const char *dir, uint32_t keep_generation)
 
 static bool finish_book_cache(book_cache_writer_t *writer, const abs_book_t *books, int count)
 {
-    if (!storage_ready() || writer->failed) return false;
-    for (int page = 0; page < writer->pages; ++page) {
+    if (!storage_ready()) return false;
+    const int pages = (count + ABS_BOOK_PAGE_SIZE - 1) / ABS_BOOK_PAGE_SIZE;
+    for (int page = 0; page < pages; ++page) {
         char path[160];
         snprintf(path, sizeof(path), "%s/items-%08lx-%03d.json", writer->dir,
                  (unsigned long)writer->generation, page);
-        char *raw = storage_read_file(path, NULL);
-        char *enriched = raw ? abs_enrich_books_page(raw, books, count) : NULL;
-        free(raw);
-        if (!enriched || storage_write_file(path, enriched, strlen(enriched)) != ESP_OK) {
-            free(enriched);
-            ESP_LOGW(TAG, "could not finish library cache page %d", page);
+        const int offset = page * ABS_BOOK_PAGE_SIZE;
+        int page_count = count - offset;
+        if (page_count > ABS_BOOK_PAGE_SIZE) page_count = ABS_BOOK_PAGE_SIZE;
+        char *json = abs_books_cache_json(books + offset, page_count);
+        if (!json || storage_write_file(path, json, strlen(json)) != ESP_OK) {
+            free(json);
+            ESP_LOGW(TAG, "could not write compact library cache page %d", page);
             return false;
         }
-        free(enriched);
+        free(json);
     }
     char index_path[128], manifest[96];
     snprintf(index_path, sizeof(index_path), "%s/items-index.txt", writer->dir);
-    int len = snprintf(manifest, sizeof(manifest), "1 %08lx %d %d\n",
-                       (unsigned long)writer->generation, writer->pages, count);
+    int len = snprintf(manifest, sizeof(manifest), "2 %08lx %d %d\n",
+                       (unsigned long)writer->generation, pages, count);
     if (storage_write_file(index_path, manifest, len) != ESP_OK) return false;
     char legacy_path[128];
     snprintf(legacy_path, sizeof(legacy_path), "%s/items.json", writer->dir);
     unlink(legacy_path);
-    remove_old_item_pages(writer->dir, writer->generation);
+    remove_old_item_pages(writer->dir, writer->generation, true);
     return true;
+}
+
+static void clean_item_cache_for_boot(const char *dir)
+{
+    char index_path[128];
+    snprintf(index_path, sizeof(index_path), "%s/items-index.txt", dir);
+    char *manifest = storage_read_file(index_path, NULL);
+    unsigned version = 0, generation = 0;
+    int pages = -1, count = -1;
+    bool valid = manifest && sscanf(manifest, "%u %x %d %d", &version, &generation, &pages, &count) == 4 &&
+                 version == 2 && pages >= 0 && pages <= ABS_MAX_LIBRARY_BOOKS / ABS_BOOK_PAGE_SIZE + 1 &&
+                 count >= 0 && count <= ABS_MAX_LIBRARY_BOOKS;
+    free(manifest);
+    remove_old_item_pages(dir, generation, valid);
 }
 
 static bool load_paged_cache(const char *dir, abs_book_t **out_books, int *out_count)
@@ -361,7 +367,7 @@ static bool load_paged_cache(const char *dir, abs_book_t **out_books, int *out_c
     unsigned version = 0, generation = 0;
     int pages = -1, expected_count = -1;
     bool valid = sscanf(manifest, "%u %x %d %d", &version, &generation, &pages, &expected_count) == 4 &&
-                 version == 1 && pages >= 0 && pages <= ABS_MAX_LIBRARY_BOOKS / ABS_BOOK_PAGE_SIZE + 1 &&
+                 version == 2 && pages >= 0 && pages <= ABS_MAX_LIBRARY_BOOKS / ABS_BOOK_PAGE_SIZE + 1 &&
                  expected_count >= 0 && expected_count <= ABS_MAX_LIBRARY_BOOKS;
     free(manifest);
     if (!valid) return false;
@@ -374,7 +380,7 @@ static bool load_paged_cache(const char *dir, abs_book_t **out_books, int *out_c
         char *json = storage_read_file(path, NULL);
         abs_book_t *page_books = NULL;
         int page_count = 0;
-        esp_err_t err = json ? abs_parse_books(json, NULL, &page_books, &page_count) : ESP_FAIL;
+        esp_err_t err = json ? abs_parse_cached_books(json, &page_books, &page_count) : ESP_FAIL;
         free(json);
         if (err == ESP_OK) err = abs_append_books(&books, &count, &capacity, page_books, page_count);
         if (err != ESP_OK) {
@@ -456,13 +462,13 @@ bool catalog_load_network(bool quiet)
     int n = 0;
     char dir[96];
     catalog_dir(dir, sizeof(dir));
-    book_cache_writer_t writer = {.generation = (uint32_t)esp_timer_get_time()};
+    book_cache_writer_t writer = {.generation = esp_random()};
     if (dir[0]) {
         strlcpy(writer.dir, dir, sizeof(writer.dir));
         (void)storage_mkdirs(dir);
+        clean_item_cache_for_boot(dir);
     }
-    abs_books_page_callback_t callback = dir[0] ? cache_book_page : NULL;
-    if (abs_get_books(s_library, &fresh, &n, callback, &writer) != ESP_OK) {
+    if (abs_get_books(s_library, &fresh, &n) != ESP_OK) {
         abs_free_books(fresh, n);
         if (!quiet) ui_show_message_locked("Couldn't load the library.\nTry Refresh in Settings.");
         xSemaphoreGive(s_catalog_lock);

@@ -299,13 +299,15 @@ static void append_author(abs_book_t *book, const char *name)
     while (*name == ' ' || *name == '\t') ++name;
     size_t len = strlen(name);
     while (len && (name[len - 1] == ' ' || name[len - 1] == '\t')) --len;
-    if (!len || len >= sizeof(book->authors[0])) return;
+    if (!len || len >= 64) return;
+    char normalized[64];
+    memcpy(normalized, name, len);
+    normalized[len] = 0;
     for (int i = 0; i < book->author_count; ++i) {
-        if (strncasecmp(book->authors[i], name, len) == 0 && book->authors[i][len] == 0) return;
+        if (strcasecmp(book->authors[i], normalized) == 0) return;
     }
-    memcpy(book->authors[book->author_count], name, len);
-    book->authors[book->author_count][len] = 0;
-    ++book->author_count;
+    char *copy = psram_strdup(normalized);
+    if (copy) book->authors[book->author_count++] = copy;
 }
 
 static void parse_authors(const cJSON *metadata, abs_book_t *book)
@@ -346,6 +348,14 @@ typedef struct {
     bool finished;
 } abs_progress_entry_t;
 
+static int progress_cmp(const void *pa, const void *pb)
+{
+    const abs_progress_entry_t *a = pa, *b = pb;
+    const int id_cmp = strcmp(a->item_id, b->item_id);
+    if (id_cmp) return id_cmp;
+    return a->last_update < b->last_update ? -1 : (a->last_update > b->last_update ? 1 : 0);
+}
+
 static esp_err_t parse_progress(const char *me_json, abs_progress_entry_t **out, int *out_count)
 {
     *out = NULL;
@@ -373,17 +383,23 @@ static esp_err_t parse_progress(const char *me_json, abs_progress_entry_t **out,
         entry->finished = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(row, "isFinished"));
     }
     cJSON_Delete(root);
+    if (*out_count > 1) qsort(entries, *out_count, sizeof(*entries), progress_cmp);
     *out = entries;
     return ESP_OK;
 }
 
 static void apply_progress(abs_book_t *books, int count, const abs_progress_entry_t *entries, int entry_count)
 {
-    for (int p = 0; p < entry_count; ++p) {
-        const abs_progress_entry_t *entry = &entries[p];
-        for (int i = 0; i < count; ++i) {
-            abs_book_t *book = &books[i];
-            if (strcmp(book->id, entry->item_id) != 0) continue;
+    for (int i = 0; i < count; ++i) {
+        abs_book_t *book = &books[i];
+        int low = 0, high = entry_count;
+        while (low < high) {
+            int mid = low + (high - low) / 2;
+            if (strcmp(entries[mid].item_id, book->id) < 0) low = mid + 1;
+            else high = mid;
+        }
+        for (int p = low; p < entry_count && strcmp(entries[p].item_id, book->id) == 0; ++p) {
+            const abs_progress_entry_t *entry = &entries[p];
             if (!book->podcast && !entry->episode_id[0]) {
                 book->current_time = entry->current_time;
                 book->progress = entry->progress;
@@ -397,7 +413,6 @@ static void apply_progress(abs_book_t *books, int count, const abs_progress_entr
                 book->last_update = entry->last_update;
                 strlcpy(book->resume_episode, entry->episode_id, sizeof(book->resume_episode));
             }
-            break;
         }
     }
 }
@@ -508,6 +523,114 @@ void abs_sort_books(abs_book_t *books, int count)
     if (books && count > 1) qsort(books, count, sizeof(*books), book_cmp);
 }
 
+char *abs_books_cache_json(const abs_book_t *books, int count)
+{
+    cJSON *root = cJSON_CreateObject();
+    cJSON *items = cJSON_CreateArray();
+    if (!root || !items) {
+        cJSON_Delete(root);
+        cJSON_Delete(items);
+        return NULL;
+    }
+    cJSON_AddNumberToObject(root, "v", 2);
+    cJSON_AddItemToObject(root, "b", items);
+    for (int i = 0; i < count; ++i) {
+        const abs_book_t *book = &books[i];
+        cJSON *item = cJSON_CreateObject();
+        cJSON *authors = cJSON_CreateArray();
+        if (!item || !authors) {
+            cJSON_Delete(item);
+            cJSON_Delete(authors);
+            cJSON_Delete(root);
+            return NULL;
+        }
+        cJSON_AddStringToObject(item, "i", book->id);
+        cJSON_AddStringToObject(item, "t", book->title ? book->title : "Untitled");
+        cJSON_AddStringToObject(item, "s", book->sort_title ? book->sort_title : "");
+        cJSON_AddStringToObject(item, "a", book->author ? book->author : "");
+        for (int a = 0; a < book->author_count; ++a) {
+            cJSON_AddItemToArray(authors, cJSON_CreateString(book->authors[a] ? book->authors[a] : ""));
+        }
+        cJSON_AddItemToObject(item, "A", authors);
+        cJSON_AddStringToObject(item, "S", book->series_name);
+        cJSON_AddStringToObject(item, "I", book->series_id);
+        cJSON_AddStringToObject(item, "q", book->series_sequence);
+        cJSON_AddNumberToObject(item, "N", book->series_total);
+        cJSON_AddNumberToObject(item, "d", book->duration);
+        cJSON_AddNumberToObject(item, "c", book->current_time);
+        cJSON_AddNumberToObject(item, "p", book->progress);
+        cJSON_AddBoolToObject(item, "f", book->finished);
+        cJSON_AddNumberToObject(item, "u", book->last_update);
+        cJSON_AddNumberToObject(item, "x", book->added_at);
+        cJSON_AddBoolToObject(item, "P", book->podcast);
+        cJSON_AddNumberToObject(item, "e", book->num_episodes);
+        cJSON_AddStringToObject(item, "r", book->resume_episode);
+        cJSON_AddItemToArray(items, item);
+    }
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    return json;
+}
+
+esp_err_t abs_parse_cached_books(const char *json, abs_book_t **out_books, int *out_count)
+{
+    *out_books = NULL;
+    *out_count = 0;
+    cJSON *root = cJSON_Parse(json);
+    if (!root) return ESP_FAIL;
+    const cJSON *items = cJSON_GetObjectItemCaseSensitive(root, "b");
+    if ((int)json_num(root, "v") != 2 || !cJSON_IsArray(items)) {
+        cJSON_Delete(root);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    int n = cJSON_GetArraySize(items);
+    abs_book_t *books = heap_caps_calloc(n ? n : 1, sizeof(*books), MALLOC_CAP_SPIRAM);
+    if (!books) {
+        cJSON_Delete(root);
+        return ESP_ERR_NO_MEM;
+    }
+    esp_err_t err = ESP_OK;
+    const cJSON *item;
+    cJSON_ArrayForEach(item, items) {
+        const char *id = json_str(item, "i");
+        if (!id) { err = ESP_ERR_INVALID_RESPONSE; break; }
+        abs_book_t *book = &books[*out_count];
+        strlcpy(book->id, id, sizeof(book->id));
+        book->title = psram_strdup(json_str(item, "t") ?: "Untitled");
+        book->sort_title = psram_strdup(json_str(item, "s") ?: book->title);
+        book->author = psram_strdup(json_str(item, "a") ?: "");
+        if (!book->title || !book->sort_title || !book->author) { err = ESP_ERR_NO_MEM; break; }
+        strlcpy(book->series_name, json_str(item, "S") ?: "", sizeof(book->series_name));
+        strlcpy(book->series_id, json_str(item, "I") ?: "", sizeof(book->series_id));
+        strlcpy(book->series_sequence, json_str(item, "q") ?: "", sizeof(book->series_sequence));
+        strlcpy(book->resume_episode, json_str(item, "r") ?: "", sizeof(book->resume_episode));
+        book->series_total = (int)json_num(item, "N");
+        book->duration = json_num(item, "d");
+        book->current_time = json_num(item, "c");
+        book->progress = (float)json_num(item, "p");
+        book->finished = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(item, "f"));
+        book->last_update = json_num(item, "u");
+        book->added_at = json_num(item, "x");
+        book->podcast = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(item, "P"));
+        book->num_episodes = (int)json_num(item, "e");
+        const cJSON *authors = cJSON_GetObjectItemCaseSensitive(item, "A");
+        const cJSON *author;
+        cJSON_ArrayForEach(author, authors) {
+            if (cJSON_IsString(author)) append_author(book, author->valuestring);
+        }
+        ++*out_count;
+    }
+    cJSON_Delete(root);
+    if (err != ESP_OK) {
+        abs_free_books(books, *out_count + 1);
+        *out_count = 0;
+        return err;
+    }
+    abs_sort_books(books, *out_count);
+    *out_books = books;
+    return ESP_OK;
+}
+
 esp_err_t abs_parse_libraries(const char *json, abs_library_t **out, int *count)
 {
     *out = NULL;
@@ -530,33 +653,27 @@ esp_err_t abs_parse_libraries(const char *json, abs_library_t **out, int *count)
     return root ? ESP_OK : ESP_FAIL;
 }
 
-static bool series_row_has_item(const cJSON *row, const char *item_id, char *sequence, size_t sequence_len)
+typedef struct {
+    const char *id;
+    int book_index;
+} book_id_ref_t;
+
+static int book_id_ref_cmp(const void *pa, const void *pb)
 {
-    const cJSON *ids = cJSON_GetObjectItemCaseSensitive(row, "libraryItemIds");
-    const cJSON *id;
-    cJSON_ArrayForEach(id, ids) {
-        if (cJSON_IsString(id) && strcmp(id->valuestring, item_id) == 0) return true;
-    }
+    const book_id_ref_t *a = pa, *b = pb;
+    return strcmp(a->id, b->id);
+}
 
-    const cJSON *members = cJSON_GetObjectItemCaseSensitive(row, "books");
-    if (!cJSON_IsArray(members)) members = cJSON_GetObjectItemCaseSensitive(row, "items");
-    const cJSON *member;
-    cJSON_ArrayForEach(member, members) {
-        const cJSON *item = cJSON_GetObjectItemCaseSensitive(member, "libraryItem");
-        if (!cJSON_IsObject(item)) item = cJSON_GetObjectItemCaseSensitive(member, "item");
-        if (!cJSON_IsObject(item)) item = member;
-        const char *id_value = json_str(item, "id");
-        if (!id_value) id_value = json_str(member, "libraryItemId");
-        if (!id_value) id_value = json_str(member, "itemId");
-        if (!id_value || strcmp(id_value, item_id) != 0) continue;
-
-        const cJSON *seq = cJSON_GetObjectItemCaseSensitive(member, "seriesSequence");
-        if (!seq) seq = series_sequence_value(member);
-        if (!seq) seq = series_sequence_value(item);
-        set_sequence(sequence, sequence_len, seq);
-        return true;
+static abs_book_t *find_book_by_id(abs_book_t *books, book_id_ref_t *refs, int count, const char *id)
+{
+    int low = 0, high = count;
+    while (low < high) {
+        int mid = low + (high - low) / 2;
+        int cmp = strcmp(refs[mid].id, id);
+        if (cmp < 0) low = mid + 1;
+        else high = mid;
     }
-    return false;
+    return low < count && strcmp(refs[low].id, id) == 0 ? &books[refs[low].book_index] : NULL;
 }
 
 static bool canonical_series_label(const char *label, const char *name, char *sequence, size_t length)
@@ -584,12 +701,32 @@ static bool canonical_series_label(const char *label, const char *name, char *se
     return *rest == 0 || *rest == ',';
 }
 
-static void merge_series_row(const cJSON *row, abs_book_t *books, int book_count)
+static void merge_series_member(const char *series_id, const char *series_name, int total,
+                                const char *member_sequence, abs_book_t *book)
 {
-    const char *id = json_str(row, "id");
-    const char *name = json_str(row, "name");
-    if (!name || !name[0]) return;
+    const bool id_match = series_id && book->series_id[0] && strcmp(series_id, book->series_id) == 0;
+    // The metadata's series ID and the series endpoint's ID can differ. Match the canonical
+    // endpoint name only for a book that is actually listed as a member of that series.
+    char parsed_sequence[24] = "";
+    const bool name_match = book->series_name[0] &&
+        (strcasecmp(series_name, book->series_name) == 0 ||
+         canonical_series_label(book->series_name, series_name, parsed_sequence, sizeof(parsed_sequence)));
+    if (id_match || name_match || !book->series_name[0]) {
+        strlcpy(book->series_name, series_name, sizeof(book->series_name));
+        if (series_id) strlcpy(book->series_id, series_id, sizeof(book->series_id));
+        if (!book->series_sequence[0]) {
+            const char *sequence = member_sequence && member_sequence[0] ? member_sequence : parsed_sequence;
+            if (sequence[0]) strlcpy(book->series_sequence, sequence, sizeof(book->series_sequence));
+        }
+        book->series_total = total;
+    }
+}
 
+static void merge_series_row(const cJSON *row, abs_book_t *books, book_id_ref_t *refs, int book_count)
+{
+    const char *series_id = json_str(row, "id");
+    const char *series_name = json_str(row, "name");
+    if (!series_name || !series_name[0]) return;
     int total = (int)json_num(row, "numBooks");
     const cJSON *ids = cJSON_GetObjectItemCaseSensitive(row, "libraryItemIds");
     const cJSON *members = cJSON_GetObjectItemCaseSensitive(row, "books");
@@ -598,57 +735,72 @@ static void merge_series_row(const cJSON *row, abs_book_t *books, int book_count
     if (member_count == 0) member_count = cJSON_GetArraySize(members);
     if (total < member_count) total = member_count;
 
-    for (int i = 0; i < book_count; ++i) {
-        abs_book_t *book = &books[i];
-        char member_sequence[24] = "";
-        const bool member = series_row_has_item(row, book->id, member_sequence, sizeof(member_sequence));
-        const bool id_match = id && book->series_id[0] && strcmp(id, book->series_id) == 0;
-        // Audiobookshelf's metadata series ID and the library-series record ID are not always
-        // the same identifier. Match the selected primary series by name as well, but only among
-        // rows that actually contain this book. Without this membership check, a name/ID match
-        // against another row can overwrite the book's primary series.
-        char parsed_sequence[24] = "";
-        const bool name_match = book->series_name[0] &&
-            (strcasecmp(name, book->series_name) == 0 ||
-             canonical_series_label(book->series_name, name, parsed_sequence, sizeof(parsed_sequence)));
-        // Metadata order selects the primary series. The endpoint supplies canonical names/counts
-        // and member sequence values; additional series memberships do not replace that choice.
-        if (member && (id_match || name_match || !book->series_name[0])) {
-            strlcpy(book->series_name, name, sizeof(book->series_name));
-            if (id) strlcpy(book->series_id, id, sizeof(book->series_id));
-            if (!book->series_sequence[0]) {
-                const char *sequence = member_sequence[0] ? member_sequence : parsed_sequence;
-                if (sequence[0]) strlcpy(book->series_sequence, sequence, sizeof(book->series_sequence));
-            }
-            book->series_total = total;
+    if (cJSON_IsArray(members) && cJSON_GetArraySize(members) > 0) {
+        const cJSON *member;
+        cJSON_ArrayForEach(member, members) {
+            const cJSON *item = cJSON_GetObjectItemCaseSensitive(member, "libraryItem");
+            if (!cJSON_IsObject(item)) item = cJSON_GetObjectItemCaseSensitive(member, "item");
+            if (!cJSON_IsObject(item)) item = member;
+            const char *item_id = json_str(item, "id");
+            if (!item_id) item_id = json_str(member, "libraryItemId");
+            if (!item_id) item_id = json_str(member, "itemId");
+            if (!item_id) continue;
+            abs_book_t *book = find_book_by_id(books, refs, book_count, item_id);
+            if (!book) continue;
+            char sequence[24] = "";
+            const cJSON *seq = cJSON_GetObjectItemCaseSensitive(member, "seriesSequence");
+            if (!seq) seq = series_sequence_value(member);
+            if (!seq) seq = series_sequence_value(item);
+            set_sequence(sequence, sizeof(sequence), seq);
+            merge_series_member(series_id, series_name, total, sequence, book);
+        }
+    } else {
+        const cJSON *id_item;
+        cJSON_ArrayForEach(id_item, ids) {
+            if (!cJSON_IsString(id_item)) continue;
+            abs_book_t *book = find_book_by_id(books, refs, book_count, id_item->valuestring);
+            if (book) merge_series_member(series_id, series_name, total, "", book);
         }
     }
 }
 
 static void fetch_series_catalog(const char *library_id, abs_book_t *books, int book_count)
 {
-    // Audiobookshelf paginates this endpoint. Fetching every page matters for libraries with
-    // hundreds of series, and avoids reconstructing false per-book series from title strings.
+    enum { SERIES_PAGE_SIZE = 250 };
+    book_id_ref_t *refs = heap_caps_malloc((size_t)(book_count ? book_count : 1) * sizeof(*refs),
+                                           MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!refs) {
+        ESP_LOGW(TAG, "not enough memory to reconcile series metadata; keeping item metadata");
+        return;
+    }
+    for (int i = 0; i < book_count; ++i) refs[i] = (book_id_ref_t){books[i].id, i};
+    qsort(refs, book_count, sizeof(*refs), book_id_ref_cmp);
+
+    // Read all series pages, reusing the HTTP connection and matching each member by ID.
+    esp_http_client_handle_t connection = NULL;
     for (int page = 0; page < 100; ++page) {
         char path[160], *json = NULL;
-        snprintf(path, sizeof(path), "/api/libraries/%s/series?limit=100&page=%d", library_id, page);
-        if (request(HTTP_METHOD_GET, path, NULL, &json) != 200 || !json) {
+        snprintf(path, sizeof(path), "/api/libraries/%s/series?limit=%d&page=%d",
+                 library_id, SERIES_PAGE_SIZE, page);
+        if (request_len(HTTP_METHOD_GET, path, NULL, &json, NULL, &connection) != 200 || !json) {
             free(json);
             if (page == 0) ESP_LOGW(TAG, "series endpoint unavailable; using item metadata");
-            return;
+            break;
         }
         cJSON *root = cJSON_Parse(json);
         free(json);
-        if (!root) return;
+        if (!root) break;
         const cJSON *rows = cJSON_GetObjectItemCaseSensitive(root, "results");
         if (!cJSON_IsArray(rows)) rows = root;
         const int count = cJSON_GetArraySize(rows);
         const int total = (int)json_num(root, "total");
         const cJSON *row;
-        cJSON_ArrayForEach(row, rows) merge_series_row(row, books, book_count);
+        cJSON_ArrayForEach(row, rows) merge_series_row(row, books, refs, book_count);
         cJSON_Delete(root);
-        if (!count || (count < 100 && (!total || (page + 1) * 100 >= total))) return;
+        if (!count || (count < SERIES_PAGE_SIZE && (!total || (page + 1) * SERIES_PAGE_SIZE >= total))) break;
     }
+    if (connection) esp_http_client_cleanup(connection);
+    free(refs);
 }
 
 static int sequence_ceiling(const char *sequence)
@@ -661,53 +813,42 @@ static int sequence_ceiling(const char *sequence)
     return whole + (value > whole ? 1 : 0);
 }
 
-static void fill_series_totals(abs_book_t *books, int book_count)
+typedef struct {
+    const char *name;
+    int book_index;
+} series_total_ref_t;
+
+static int series_total_ref_cmp(const void *pa, const void *pb)
 {
-    for (int i = 0; i < book_count; ++i) {
-        abs_book_t *book = &books[i];
-        if (!book->series_name[0]) continue;
-        int count = 0, highest_sequence = 0;
-        for (int j = 0; j < book_count; ++j) {
-            if (strcasecmp(book->series_name, books[j].series_name) != 0) continue;
-            ++count;
-            const int ceiling = sequence_ceiling(books[j].series_sequence);
-            if (ceiling > highest_sequence) highest_sequence = ceiling;
-        }
-        if (book->series_total < count) book->series_total = count;
-        if (book->series_total < highest_sequence) book->series_total = highest_sequence;
-    }
+    const series_total_ref_t *a = pa, *b = pb;
+    return strcasecmp(a->name, b->name);
 }
 
-char *abs_enrich_books_page(const char *items_json, const abs_book_t *books, int book_count)
+static void fill_series_totals(abs_book_t *books, int book_count)
 {
-    cJSON *root = cJSON_Parse(items_json);
-    if (!root) return NULL;
-    const cJSON *results = cJSON_GetObjectItemCaseSensitive(root, "results");
-    cJSON *item;
-    cJSON_ArrayForEach(item, results) {
-        const char *id = json_str(item, "id");
-        if (!id) continue;
-        for (int i = 0; i < book_count; ++i) {
-            if (strcmp(books[i].id, id) != 0) continue;
-            cJSON *series = cJSON_CreateObject();
-            cJSON_AddStringToObject(series, "id", books[i].series_id);
-            cJSON_AddStringToObject(series, "name", books[i].series_name);
-            cJSON_AddStringToObject(series, "sequence", books[i].series_sequence);
-            cJSON_AddNumberToObject(series, "total", books[i].series_total);
-            cJSON_AddItemToObject(item, "_chapterSeries", series);
-            cJSON *progress = cJSON_CreateObject();
-            cJSON_AddNumberToObject(progress, "currentTime", books[i].current_time);
-            cJSON_AddNumberToObject(progress, "progress", books[i].progress);
-            cJSON_AddBoolToObject(progress, "finished", books[i].finished);
-            cJSON_AddNumberToObject(progress, "lastUpdate", books[i].last_update);
-            cJSON_AddStringToObject(progress, "episodeId", books[i].resume_episode);
-            cJSON_AddItemToObject(item, "_chapterProgress", progress);
-            break;
-        }
+    series_total_ref_t *refs = heap_caps_malloc((size_t)(book_count ? book_count : 1) * sizeof(*refs),
+                                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!refs) return;
+    int n = 0;
+    for (int i = 0; i < book_count; ++i) {
+        if (books[i].series_name[0]) refs[n++] = (series_total_ref_t){books[i].series_name, i};
     }
-    char *serialized = cJSON_PrintUnformatted(root);
-    cJSON_Delete(root);
-    return serialized;
+    qsort(refs, n, sizeof(*refs), series_total_ref_cmp);
+    for (int start = 0; start < n;) {
+        int end = start + 1, highest_sequence = 0;
+        while (end < n && strcasecmp(refs[start].name, refs[end].name) == 0) ++end;
+        for (int j = start; j < end; ++j) {
+            const int ceiling = sequence_ceiling(books[refs[j].book_index].series_sequence);
+            if (ceiling > highest_sequence) highest_sequence = ceiling;
+        }
+        const int total = end - start > highest_sequence ? end - start : highest_sequence;
+        for (int j = start; j < end; ++j) {
+            abs_book_t *book = &books[refs[j].book_index];
+            if (book->series_total < total) book->series_total = total;
+        }
+        start = end;
+    }
+    free(refs);
 }
 
 esp_err_t abs_get_libraries(abs_library_t **out, int *count, char **json)
@@ -723,8 +864,7 @@ esp_err_t abs_get_libraries(abs_library_t **out, int *count, char **json)
     return abs_parse_libraries(*json, out, count);
 }
 
-esp_err_t abs_get_books(const char *library_id, abs_book_t **out_books, int *out_count,
-                        abs_books_page_callback_t page_callback, void *context)
+esp_err_t abs_get_books(const char *library_id, abs_book_t **out_books, int *out_count)
 {
     *out_books = NULL;
     *out_count = 0;
@@ -772,9 +912,6 @@ esp_err_t abs_get_books(const char *library_id, abs_book_t **out_books, int *out
             break;
         }
         ESP_LOGI(TAG, "library page %d: %d items", page + 1, page_count);
-        if (page_callback && !page_callback(page, page_json, strlen(page_json), context)) {
-            ESP_LOGW(TAG, "could not cache library page %d; continuing with the live library", page);
-        }
         free(page_json);
         err = abs_append_books(out_books, out_count, &capacity, page_books, page_count);
         if (err != ESP_OK) {
@@ -950,6 +1087,7 @@ void abs_free_books(abs_book_t *books, int count)
         free(books[i].title);
         free(books[i].sort_title);
         free(books[i].author);
+        for (int a = 0; a < books[i].author_count; ++a) free(books[i].authors[a]);
     }
     free(books);
 }

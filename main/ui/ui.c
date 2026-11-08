@@ -338,47 +338,87 @@ static int author_sort_compare(const char *left, const char *right)
     return result ? result : strcasecmp(left ? left : "", right ? right : "");
 }
 
-static void sort_groups(group_kind_t kind)
+typedef struct {
+    const char *name;
+    bool author_label;
+} group_ref_t;
+
+static void group_ref_copy_name(const group_ref_t *ref, char out[128])
 {
-    for (int i = 1; i < s_group_count; ++i) {
-        group_entry_t value = s_groups[i];
-        int j = i;
-        while (j > 0 && (kind == GROUP_AUTHOR
-                             ? author_sort_compare(s_groups[j - 1].name, value.name)
-                             : strcasecmp(s_groups[j - 1].name, value.name)) > 0) {
-            s_groups[j] = s_groups[j - 1];
-            --j;
-        }
-        s_groups[j] = value;
+    strlcpy(out, ref->name ? ref->name : "", 128);
+    if (ref->author_label) {
+        char *separator = strchr(out, ',');
+        if (separator) *separator = 0;
+        char *start = out;
+        while (*start == ' ' || *start == '\t') ++start;
+        if (start != out) memmove(out, start, strlen(start) + 1);
+        size_t length = strlen(out);
+        while (length && (out[length - 1] == ' ' || out[length - 1] == '\t')) out[--length] = 0;
     }
+}
+
+static int group_ref_cmp(const void *pa, const void *pb)
+{
+    const group_ref_t *a = pa, *b = pb;
+    char aname[128], bname[128];
+    group_ref_copy_name(a, aname);
+    group_ref_copy_name(b, bname);
+    return strcasecmp(aname, bname);
+}
+
+static int group_series_cmp(const void *pa, const void *pb)
+{
+    const group_entry_t *a = pa, *b = pb;
+    return strcasecmp(a->name, b->name);
+}
+
+static int group_author_cmp(const void *pa, const void *pb)
+{
+    const group_entry_t *a = pa, *b = pb;
+    return author_sort_compare(a->name, b->name);
 }
 
 static void build_groups(group_kind_t kind)
 {
     s_group_count = 0;
-    if (!s_groups) return;
-    for (int i = 0; i < s_book_count && s_group_count < UI_MAX_GROUPS; ++i) {
+    if (!s_groups || !s_books || s_book_count <= 0) return;
+    const size_t per_book = kind == GROUP_SERIES ? 1 : 6;
+    const size_t max_refs = (size_t)s_book_count * per_book;
+    group_ref_t *refs = heap_caps_calloc(max_refs ? max_refs : 1, sizeof(*refs),
+                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!refs) return;
+    size_t ref_count = 0;
+    for (int i = 0; i < s_book_count; ++i) {
         const abs_book_t *book = &s_books[i];
         if (book->podcast) continue;
-        const int names = kind == GROUP_SERIES ? 1 : (book->author_count ? book->author_count : 1);
-        for (int a = 0; a < names && s_group_count < UI_MAX_GROUPS; ++a) {
-            const char *name = kind == GROUP_SERIES ? book->series_name
-                               : book->author_count ? book->authors[a] : primary_author(book->author);
-            if (!name || !name[0]) continue;
-            int found = -1;
-            for (int g = 0; g < s_group_count; ++g) {
-                if (strcasecmp(s_groups[g].name, name) == 0) { found = g; break; }
+        if (kind == GROUP_SERIES) {
+            if (book->series_name[0]) refs[ref_count++].name = book->series_name;
+        } else if (book->author_count) {
+            for (int a = 0; a < book->author_count; ++a) {
+                if (book->authors[a] && book->authors[a][0]) refs[ref_count++].name = book->authors[a];
             }
-            if (found >= 0) {
-                ++s_groups[found].count;
-            } else {
-                strlcpy(s_groups[s_group_count].name, name, sizeof(s_groups[s_group_count].name));
-                s_groups[s_group_count].count = 1;
-                ++s_group_count;
-            }
+        } else if (book->author && book->author[0]) {
+            refs[ref_count].name = book->author;
+            refs[ref_count++].author_label = true;
         }
     }
-    sort_groups(kind);
+    qsort(refs, ref_count, sizeof(*refs), group_ref_cmp);
+    char previous[128] = "";
+    for (size_t i = 0; i < ref_count; ++i) {
+        char name[128];
+        group_ref_copy_name(&refs[i], name);
+        if (!name[0]) continue;
+        if (s_group_count && strcasecmp(previous, name) == 0) {
+            ++s_groups[s_group_count - 1].count;
+        } else if (s_group_count < UI_MAX_GROUPS) {
+            strlcpy(s_groups[s_group_count].name, name, sizeof(s_groups[s_group_count].name));
+            s_groups[s_group_count].count = 1;
+            strlcpy(previous, name, sizeof(previous));
+            ++s_group_count;
+        }
+    }
+    free(refs);
+    qsort(s_groups, s_group_count, sizeof(*s_groups), kind == GROUP_AUTHOR ? group_author_cmp : group_series_cmp);
     s_group_selection = 0;
 }
 
@@ -402,6 +442,31 @@ static bool book_in_progress(const abs_book_t *book)
     return book->current_time > 0 && !book->finished && book->progress < 0.995f;
 }
 
+static int visible_series_cmp(const void *pa, const void *pb)
+{
+    const abs_book_t *a = &s_books[*(const int *)pa];
+    const abs_book_t *b = &s_books[*(const int *)pb];
+    const float as = a->series_sequence[0] ? strtof(a->series_sequence, NULL) : 1000000.0f;
+    const float bs = b->series_sequence[0] ? strtof(b->series_sequence, NULL) : 1000000.0f;
+    if (as != bs) return as < bs ? -1 : 1;
+    return strcasecmp(a->sort_title, b->sort_title);
+}
+
+static int visible_author_cmp(const void *pa, const void *pb)
+{
+    const abs_book_t *a = &s_books[*(const int *)pa];
+    const abs_book_t *b = &s_books[*(const int *)pb];
+    const int cmp = author_sort_compare(a->author, b->author);
+    return cmp ? cmp : strcasecmp(a->sort_title, b->sort_title);
+}
+
+static int visible_continue_cmp(const void *pa, const void *pb)
+{
+    const double a = s_books[*(const int *)pa].last_update;
+    const double b = s_books[*(const int *)pb].last_update;
+    return a > b ? -1 : (a < b ? 1 : 0);
+}
+
 static void build_visible_items(void)
 {
     s_visible_count = 0;
@@ -417,36 +482,10 @@ static void build_visible_items(void)
     }
     if (s_list_kind == LIST_SERIES && s_selected_group >= 0) {
         // Books within a series should follow the server-provided series sequence when present.
-        for (int i = 1; i < s_visible_count; ++i) {
-            const int value = s_visible[i];
-            int j = i;
-            while (j > 0) {
-                const char *left_text = s_books[s_visible[j - 1]].series_sequence;
-                const char *right_text = s_books[value].series_sequence;
-                const float left = left_text[0] ? strtof(left_text, NULL) : 1000000.0f;
-                const float right = right_text[0] ? strtof(right_text, NULL) : 1000000.0f;
-                if (left < right || (left == right && strcasecmp(s_books[s_visible[j - 1]].sort_title,
-                                                                  s_books[value].sort_title) <= 0)) break;
-                s_visible[j] = s_visible[j - 1];
-                --j;
-            }
-            s_visible[j] = value;
-        }
+        qsort(s_visible, s_visible_count, sizeof(s_visible[0]), visible_series_cmp);
     }
     if (s_list_kind == LIST_TITLE && config_get()->library_sort_mode == 1) {
-        for (int i = 1; i < s_visible_count; ++i) {
-            const int value = s_visible[i];
-            int j = i;
-            while (j > 0) {
-                const abs_book_t *left = &s_books[s_visible[j - 1]];
-                const abs_book_t *right = &s_books[value];
-                const int cmp = author_sort_compare(left->author, right->author);
-                if (cmp < 0 || (cmp == 0 && strcasecmp(left->sort_title, right->sort_title) <= 0)) break;
-                s_visible[j] = s_visible[j - 1];
-                --j;
-            }
-            s_visible[j] = value;
-        }
+        qsort(s_visible, s_visible_count, sizeof(s_visible[0]), visible_author_cmp);
     }
     if (s_item_selection >= s_visible_count) s_item_selection = s_visible_count - 1;
     if (s_item_selection < 0) s_item_selection = 0;
@@ -458,15 +497,7 @@ static void build_continue_items(void)
     for (int i = 0; i < s_book_count && s_visible_count < UI_MAX_BOOKS; ++i) {
         if (!s_books[i].podcast && book_in_progress(&s_books[i])) s_visible[s_visible_count++] = i;
     }
-    for (int i = 1; i < s_visible_count; ++i) {
-        const int value = s_visible[i];
-        int j = i;
-        while (j > 0 && s_books[s_visible[j - 1]].last_update < s_books[value].last_update) {
-            s_visible[j] = s_visible[j - 1];
-            --j;
-        }
-        s_visible[j] = value;
-    }
+    qsort(s_visible, s_visible_count, sizeof(s_visible[0]), visible_continue_cmp);
     if (s_item_selection >= s_visible_count) s_item_selection = s_visible_count - 1;
     if (s_item_selection < 0) s_item_selection = 0;
 }

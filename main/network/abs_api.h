@@ -7,15 +7,15 @@
 #include <stdint.h>
 #include "esp_err.h"
 
-#define ABS_BOOK_PAGE_SIZE 100
-#define ABS_MAX_LIBRARY_BOOKS 5000
+#define ABS_BOOK_PAGE_SIZE 250
+#define ABS_MAX_LIBRARY_BOOKS 7000
 
 typedef struct {
     char id[40];
     char *title;
     char *sort_title;      // title without a leading "The"/"A" (server-provided), for A-Z
     char *author;          // may list several authors separated by ", "
-    char authors[6][64];   // normalized author list for Browse by Author
+    char *authors[6];      // normalized author names for Browse by Author
     uint8_t author_count;
     char series_id[40];    // primary series only; the library series endpoint canonicalizes it
     char series_name[128];
@@ -86,10 +86,8 @@ esp_err_t abs_get_libraries(abs_library_t **out, int *count, char **json);
 esp_err_t abs_parse_libraries(const char *json, abs_library_t **out, int *count);
 
 // Items of one library, sorted A-Z by sort_title. Fetches small pages so a large library does not
-// require one huge response buffer. The optional callback can persist each raw page as it arrives.
-typedef bool (*abs_books_page_callback_t)(int page, const char *json, size_t len, void *context);
-esp_err_t abs_get_books(const char *library_id, abs_book_t **out_books, int *out_count,
-                        abs_books_page_callback_t page_callback, void *context);
+// require one huge response buffer.
+esp_err_t abs_get_books(const char *library_id, abs_book_t **out_books, int *out_count);
 // Name of the library being shown (for display), and the server host.
 const char *abs_library_name(void);
 void abs_set_library_name(const char *name);
@@ -103,11 +101,11 @@ void abs_free_episodes(abs_episode_t *eps, int count);
 char *abs_episodes_to_json(const abs_episode_t *eps, int count);
 esp_err_t abs_episodes_from_json(const char *json, abs_episode_t **out, int *count);
 esp_err_t abs_parse_books(const char *items_json, const char *me_json, abs_book_t **out_books, int *out_count);
+char *abs_books_cache_json(const abs_book_t *books, int count);
+esp_err_t abs_parse_cached_books(const char *json, abs_book_t **out_books, int *out_count);
 // Transfer parsed page entries into an aggregate list, growing it as needed.
 esp_err_t abs_append_books(abs_book_t **books, int *count, int *capacity, abs_book_t *page, int page_count);
 void abs_sort_books(abs_book_t *books, int count);
-// Adds canonical series and progress fields to a cached Audiobookshelf page.
-char *abs_enrich_books_page(const char *items_json, const abs_book_t *books, int book_count);
 void abs_free_books(abs_book_t *books, int count);
 
 // Starts an HLS (transcoded) playback session at the saved position. episode_id is NULL/"" for

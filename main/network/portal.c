@@ -29,7 +29,7 @@
 static const char *TAG = "portal";
 
 #define AP_IP "192.168.4.1"
-#define PORTAL_BOOKS_PAGE_SIZE 100
+#define PORTAL_BOOKS_PAGE_SIZE 250
 
 static httpd_handle_t s_httpd;
 static TaskHandle_t s_dns_task, s_apply_task;

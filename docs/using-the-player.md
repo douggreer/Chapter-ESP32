@@ -25,7 +25,7 @@ The configurable acceleration multiplier applies when the time between encoder s
 - **Browse by Title** shows plain book titles in the selected library's title order.
 - **Browse by Author** groups books by author and shows the count.
 
-The top-level choices can be reordered or hidden in the portal. The two-knob shutdown gesture remains available regardless of that menu setting. Books and series metadata are cached on the ESP32 so the menu can appear while Wi-Fi is reconnecting. Libraries up to 5,000 items are fetched and cached in 100-item pages. Use **Refresh Audiobookshelf library** in the portal to immediately fetch updated library and series metadata; startup also loads the network library when connected.
+The top-level choices can be reordered or hidden in the portal. The two-knob shutdown gesture remains available regardless of that menu setting. Books and series metadata are cached on the ESP32 so the menu can appear while Wi-Fi is reconnecting. Libraries up to 7,000 items are fetched in 250-item pages and cached as compact Chapter metadata. Use **Refresh Audiobookshelf library** in the portal to immediately fetch updated library and series metadata; startup also loads the network library when connected.
 
 ## Open the web portal
 
