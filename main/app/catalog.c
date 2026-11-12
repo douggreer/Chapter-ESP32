@@ -413,6 +413,22 @@ static bool load_paged_cache(const char *dir, abs_book_t **out_books, int *out_c
     return true;
 }
 
+static bool read_cached_books(const char *dir, abs_book_t **out_books, int *out_count)
+{
+    *out_books = NULL;
+    *out_count = 0;
+    if (load_paged_cache(dir, out_books, out_count)) return true;
+
+    char path[128];
+    snprintf(path, sizeof(path), "%s/items.json", dir);
+    char *items = storage_read_file(path, NULL);
+    char *me = storage_read_file(ME_JSON, NULL);
+    const bool ok = items && abs_parse_books(items, me, out_books, out_count) == ESP_OK;
+    free(items);
+    free(me);
+    return ok;
+}
+
 bool catalog_load_cached(void)
 {
     if (!s_catalog_lock) return false;
@@ -421,7 +437,7 @@ bool catalog_load_cached(void)
         xSemaphoreGive(s_catalog_lock);
         return false;
     }
-    char dir[96], path[128];
+    char dir[96];
     catalog_dir(dir, sizeof(dir));
     if (!dir[0]) {
         xSemaphoreGive(s_catalog_lock);
@@ -429,15 +445,7 @@ bool catalog_load_cached(void)
     }
     abs_book_t *fresh = NULL;
     int n = 0;
-    bool ok = load_paged_cache(dir, &fresh, &n);
-    if (!ok) {
-        snprintf(path, sizeof(path), "%s/items.json", dir);
-        char *items = storage_read_file(path, NULL);
-        char *me = storage_read_file(ME_JSON, NULL);
-        ok = items && abs_parse_books(items, me, &fresh, &n) == ESP_OK;
-        free(items);
-        free(me);
-    }
+    const bool ok = read_cached_books(dir, &fresh, &n);
     if (!ok) {
         abs_free_books(fresh, n);
         xSemaphoreGive(s_catalog_lock);
@@ -482,6 +490,16 @@ bool catalog_load_network(bool quiet)
         (void)storage_mkdirs(dir);
         clean_item_cache_for_boot(dir);
     }
+    // Keep one full catalog in PSRAM at a time. A 5,500-book cache plus a second in-progress
+    // catalog can exceed the N16R8's 8 MiB PSRAM when cJSON and the /api/me progress are included.
+    // The previous generation remains safely on flash and is restored if the network refresh fails.
+    if (s_count > 0 && dir[0]) {
+        const int released = s_count;
+        show(NULL, 0, false);
+        ESP_LOGI(TAG, "released %d cached books for refresh; PSRAM free %u",
+                 released, (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+        ui_show_message("Refreshing Audiobookshelf library...");
+    }
     abs_set_work_callback(pump_catalog_ui);
     const esp_err_t fetch_error = abs_get_books(s_library, &fresh, &n);
     abs_set_work_callback(NULL);
@@ -489,7 +507,16 @@ bool catalog_load_network(bool quiet)
         ESP_LOGW(TAG, "Audiobookshelf catalog fetch stopped: %s after %d books",
                  esp_err_to_name(fetch_error), n);
         abs_free_books(fresh, n);
-        if (!quiet) ui_show_message_locked("Couldn't load the library.\nTry Refresh in Settings.");
+        abs_book_t *cached_books = NULL;
+        int cached_count = 0;
+        if (dir[0] && read_cached_books(dir, &cached_books, &cached_count)) {
+            download_sync_progress(cached_books, cached_count, false);
+            show(cached_books, cached_count, true);
+            ESP_LOGI(TAG, "restored %d cached books after refresh failed", cached_count);
+            ui_show_message(NULL);
+        } else if (!quiet) {
+            ui_show_message_locked("Couldn't load the library.\nTry Refresh in Settings.");
+        }
         xSemaphoreGive(s_catalog_lock);
         return false;
     }
@@ -498,6 +525,7 @@ bool catalog_load_network(bool quiet)
     if (dir[0] && !finish_book_cache(&writer, fresh, n)) {
         ESP_LOGW(TAG, "library loaded, but the refreshed offline cache was not committed");
     }
+    ui_show_message(NULL);
     xSemaphoreGive(s_catalog_lock);
     return true;
 }
