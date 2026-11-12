@@ -14,6 +14,7 @@
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "nvs.h"
+#include "config.h"
 #include "player.h"
 #include "power.h"
 #include "storage.h"
@@ -45,8 +46,13 @@ static volatile bool s_account_switch_pending;
 
 /* ---------- selection ---------- */
 
-static bool save_selection(void)
+typedef struct {
+    esp_err_t error;
+} selection_save_t;
+
+static void save_selection_on_internal_stack(void *arg)
 {
+    selection_save_t *result = arg;
     nvs_handle_t h;
     esp_err_t err = nvs_open("abs", NVS_READWRITE, &h);
     if (err == ESP_OK) {
@@ -54,8 +60,15 @@ static bool save_selection(void)
         if (err == ESP_OK) err = nvs_commit(h);
         nvs_close(h);
     }
-    if (err != ESP_OK) ESP_LOGE(TAG, "could not save selected library: %s", esp_err_to_name(err));
-    return err == ESP_OK;
+    result->error = err;
+}
+
+static bool save_selection(void)
+{
+    selection_save_t result = {.error = ESP_FAIL};
+    flash_safe(save_selection_on_internal_stack, &result);
+    if (result.error != ESP_OK) ESP_LOGE(TAG, "could not save selected library: %s", esp_err_to_name(result.error));
+    return result.error == ESP_OK;
 }
 
 const char *catalog_library_id(void)
@@ -260,6 +273,26 @@ static bool remove_tree_if_exists(const char *path)
     return false;
 }
 
+typedef struct {
+    bool ok;
+} account_cache_clear_t;
+
+static void clear_account_cache_on_internal_stack(void *arg)
+{
+    account_cache_clear_t *result = arg;
+    result->ok = true;
+    if (!storage_ready()) return;
+
+    // LittleFS can disable flash cache while deleting files. Run this callback through
+    // flash_safe because the portal's settings task uses a PSRAM stack.
+    result->ok &= unlink_if_exists(ME_JSON);
+    result->ok &= unlink_if_exists(LIBRARIES_JSON);
+    result->ok &= unlink_if_exists(STORAGE_ROOT "/items.json");
+    result->ok &= unlink_if_exists(STORAGE_ROOT "/library.txt");
+    result->ok &= remove_tree_if_exists(STORAGE_ROOT "/lib");
+    result->ok &= remove_tree_if_exists(STORAGE_ROOT "/covers");
+}
+
 bool catalog_prepare_account_switch(void)
 {
     if (!s_catalog_lock) return false;
@@ -271,12 +304,9 @@ bool catalog_prepare_account_switch(void)
     s_library[0] = 0;
     bool ok = save_selection();
     if (storage_ready()) {
-        ok &= unlink_if_exists(ME_JSON);
-        ok &= unlink_if_exists(LIBRARIES_JSON);
-        ok &= unlink_if_exists(STORAGE_ROOT "/items.json");
-        ok &= unlink_if_exists(STORAGE_ROOT "/library.txt");
-        ok &= remove_tree_if_exists(STORAGE_ROOT "/lib");
-        ok &= remove_tree_if_exists(STORAGE_ROOT "/covers");
+        account_cache_clear_t clear = {.ok = false};
+        flash_safe(clear_account_cache_on_internal_stack, &clear);
+        ok &= clear.ok;
     }
     if (ok) ESP_LOGI(TAG, "cleared cached library and progress for Audiobookshelf account change");
     xSemaphoreGive(s_catalog_lock);

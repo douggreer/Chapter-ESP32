@@ -44,6 +44,7 @@ This is a project-level summary of the work done to create and refine the ESP32-
 - Added independent Series and Author group sorting choices: alphabetical or largest book count first, with alphabetical tie-breaking. The choices apply to the OLED navigation and portal browser.
 - Changed deep-sleep wake to keep the cached catalog and refresh only Audiobookshelf progress for Continue Listening. Full metadata refresh still runs after a normal restart or when requested with the portal's manual refresh action.
 - Reduced the setup portal's simultaneous client limit to leave LWIP sockets available for Audiobookshelf sign-in, progress sync, and playback; added connection failure diagnostics for internal RAM and socket errors.
+- Fixed account switching after successful login by routing NVS selection writes and LittleFS cache deletion through an internal-stack worker, avoiding flash-cache assertions from the portal's PSRAM-backed task.
 
 ## Current known limits
 
