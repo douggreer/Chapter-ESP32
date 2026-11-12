@@ -147,6 +147,8 @@ static esp_err_t on_config(httpd_req_t *req)
     cJSON_AddNumberToObject(o, "browse_return_s", c->browse_return_s);
     cJSON_AddNumberToObject(o, "playback_speed_pct", c->playback_speed_pct);
     cJSON_AddNumberToObject(o, "library_sort_mode", c->library_sort_mode);
+    cJSON_AddNumberToObject(o, "series_sort_mode", c->series_sort_mode);
+    cJSON_AddNumberToObject(o, "author_sort_mode", c->author_sort_mode);
     cJSON_AddBoolToObject(o, "sleep_timer_enabled", c->sleep_timer_enabled);
     cJSON_AddNumberToObject(o, "sleep_timer_minutes", c->sleep_timer_minutes);
     cJSON_AddNumberToObject(o, "display_type", c->display_type);
@@ -505,6 +507,8 @@ static void apply(const cJSON *req)
     c->browse_return_s = num(req, "browse_return_s", c->browse_return_s);
     c->playback_speed_pct = num(req, "playback_speed_pct", c->playback_speed_pct);
     c->library_sort_mode = num(req, "library_sort_mode", c->library_sort_mode);
+    c->series_sort_mode = num(req, "series_sort_mode", c->series_sort_mode);
+    c->author_sort_mode = num(req, "author_sort_mode", c->author_sort_mode);
     c->sleep_timer_minutes = num(req, "sleep_timer_minutes", c->sleep_timer_minutes);
     c->display_type = num(req, "display_type", c->display_type);
     const cJSON *sleep_timer = cJSON_GetObjectItemCaseSensitive(req, "sleep_timer_enabled");
@@ -542,6 +546,7 @@ static void apply(const cJSON *req)
         goto out;
     }
     player_set_playback_speed(c->playback_speed_pct);
+    ui_settings_changed();
     if (connection_changed || display_changed) {
         set_status(true, account_changed
                              ? "Account changed. Restarting to load its library..."

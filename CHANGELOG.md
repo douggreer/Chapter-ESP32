@@ -41,6 +41,8 @@ This is a project-level summary of the work done to create and refine the ESP32-
 - Added compact metadata caching and paginated library loading for catalogs up to 7,000 items. Portal browsing is paginated too, keeping each HTTP response and web-server allocation small.
 - Continue Listening is limited to the 50 most recently active unfinished books. Large-library refreshes now keep the cached menus responsive, use smaller series pages, and log the compact-cache write duration.
 - Reduced Audiobookshelf item response batches to 100, refreshes one full catalog at a time to avoid duplicating large caches in PSRAM while keeping root navigation active, compacted each in-memory book record, removed repeated group sorting from root-menu redraws, and added clearer failure diagnostics.
+- Added independent Series and Author group sorting choices: alphabetical or largest book count first, with alphabetical tie-breaking. The choices apply to the OLED navigation and portal browser.
+- Changed deep-sleep wake to keep the cached catalog and refresh only Audiobookshelf progress for Continue Listening. Full metadata refresh still runs after a normal restart or when requested with the portal's manual refresh action.
 
 ## Current known limits
 

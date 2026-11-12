@@ -17,12 +17,14 @@ The board, audio, Wi-Fi portal, and both display options have been brought up on
 ## Features
 
 - Audiobookshelf sign-in using username/password or API key, token refresh, library caching, streamed playback, and progress sync. Libraries up to 7,000 items are downloaded in 100-item pages and cached as compact Chapter metadata.
-- Continue Listening lists up to the 50 most recently active unfinished books. Browse by Series uses each book's primary series; Browse by Title shows the plain title; Browse by Author groups books by author.
+- Continue Listening lists up to the 50 most recently active unfinished books. Browse by Series uses each book's primary series; Browse by Title shows the plain title; Browse by Author groups books by author. Series and Author lists can each be sorted alphabetically or by descending book count.
 - A two-knob interface with configurable fast-turn acceleration, one-second configurable holds, series book numbers in the series list, and consistent-speed marquee scrolling.
 - Volume knob click toggles play/pause and returns to playback. Select-knob hold goes back one level; volume-knob hold returns to the root menu. Holding both knobs anywhere starts clean shutdown into deep sleep.
 - Web portal with device status, remote playback and chapter controls, library browsing and playback, a device-only recent list, manual library refresh, and one save action for settings.
-- Settings for idle timeout and power-save mode, screen saver, display type, brightness, playback speed (including 1.25×), menu visibility and order, knob holds, acceleration, marquee behavior, and startup resume.
+- Settings for idle timeout and power-save mode, screen saver, display type, brightness, playback speed (including 1.25×), menu visibility and order, Series and Author sorting, knob holds, acceleration, marquee behavior, and startup resume.
 - Deep sleep turns off the OLED, Wi-Fi, and amplifier. Turning or pressing a knob wakes the ESP32 and restarts the firmware.
+
+On a normal restart, the firmware refreshes the full Audiobookshelf catalog when connected. A deep-sleep wake keeps the cached book and series metadata and refreshes only listening progress; use **Refresh Audiobookshelf library** in the portal to fetch metadata changes on demand.
 
 The SSD1306 layout uses smaller type and four display rows. Long titles wrap across the first two rows, then marquee if they still do not fit. The SH1122 keeps its wider layout. The MAX98357A has been tested from the 3.3 V rail; a suitable regulated 5 V supply can provide more speaker output. See the power section in the wiring guide before changing that connection.
 

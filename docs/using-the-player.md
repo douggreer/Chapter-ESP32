@@ -24,8 +24,9 @@ The configurable acceleration multiplier applies when the time between encoder s
 - **Browse by Series** lists primary series names and book counts. Selecting a series lists its books in series order where metadata provides a sequence. The series book number appears in this view.
 - **Browse by Title** shows plain book titles in the selected library's title order.
 - **Browse by Author** groups books by author and shows the count.
+- Series and Author groups can each be sorted alphabetically or by book count, largest first. Equal counts stay alphabetical.
 
-The top-level choices can be reordered or hidden in the portal. The two-knob shutdown gesture remains available regardless of that menu setting. Books and series metadata are cached on the ESP32 so the menu can appear while Wi-Fi is reconnecting. Libraries up to 7,000 items are fetched in 100-item pages and cached as compact Chapter metadata. Use **Refresh Audiobookshelf library** in the portal to immediately fetch updated library and series metadata; startup also loads the network library when connected.
+The top-level choices can be reordered or hidden in the portal. The two-knob shutdown gesture remains available regardless of that menu setting. Books and series metadata are cached on the ESP32 so the menu can appear while Wi-Fi is reconnecting. Libraries up to 7,000 items are fetched in 100-item pages and cached as compact Chapter metadata. A normal restart refreshes the full library when Wi-Fi is connected. Waking from Power Save Mode keeps the cached library and refreshes only Audiobookshelf listening progress for Continue Listening. Use **Refresh Audiobookshelf library** in the portal whenever you want to fetch changed book or series metadata without restarting.
 
 ## Open the web portal
 
@@ -40,7 +41,7 @@ The settings page uses one **Save all settings** action. It includes:
 - Power Save Mode, which sleeps the ESP32 when playback is stopped and the idle timeout expires. A knob wakes it.
 - Knob-hold duration; acceleration multiplier from Off through 10×; fast-turn threshold.
 - Marquee start delay, speed, and loop pause; return-to-playback delay; and startup resume choice.
-- Playback speed (1×, 1.25×, 1.5×, or 2×), title sort order, sleep timer, and root-menu visibility/order.
+- Playback speed (1×, 1.25×, 1.5×, or 2×), title sort order, Series and Author group order, sleep timer, and root-menu visibility/order.
 
 Changing the Wi-Fi or Audiobookshelf sign-in, or changing display type, restarts the ESP32 after the settings have been saved. When switching Audiobookshelf users, enter the new username **and its password**. Leaving the password blank keeps the existing sign-in for the same user. Passwords and tokens are not displayed back in the portal.
 

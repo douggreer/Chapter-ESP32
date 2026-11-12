@@ -43,7 +43,10 @@ void app_main(void)
 {
     initialize_nvs();
     config_init();
-    ESP_LOGI(TAG, "reset reason %d", (int)esp_reset_reason());
+    const esp_reset_reason_t reset_reason = esp_reset_reason();
+    const bool woke_from_sleep = reset_reason == ESP_RST_DEEPSLEEP;
+    ESP_LOGI(TAG, "reset reason %d%s", (int)reset_reason,
+             woke_from_sleep ? " (deep-sleep wake; catalog refresh skipped)" : "");
 
     ui_init();
     if (board_audio_init() != ESP_OK) ESP_LOGE(TAG, "speaker amplifier initialization failed");
@@ -76,17 +79,23 @@ void app_main(void)
     for (;;) {
         const int64_t now = esp_timer_get_time();
         if (config_complete() && !online && wifi_is_connected() && now - last_try >= retry_interval_us) {
-            // Keep the cached menu visible and usable while it refreshes.
-            if (!cached) ui_show_message("Loading Audiobookshelf library...");
-            online = catalog_load_network(cached);
+            // A deep-sleep wake keeps the full cached catalog and only refreshes user progress.
+            // Cold/software restarts still refresh the catalog, as does the explicit portal action.
+            if (!cached) ui_show_message(woke_from_sleep ? "Updating listening progress..."
+                                                        : "Loading Audiobookshelf library...");
+            online = woke_from_sleep ? catalog_refresh_progress() : catalog_load_network(cached);
             last_try = esp_timer_get_time();
             retry_interval_us = retry_delay_after(online, retry_interval_us);
             if (online) {
                 if (first_network_load) {
                     first_network_load = false;
-                    ESP_LOGI(TAG, "library loaded: internal RAM %u bytes, PSRAM %u bytes",
-                             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-                             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+                    if (woke_from_sleep) {
+                        ESP_LOGI(TAG, "listening progress refreshed after sleep wake");
+                    } else {
+                        ESP_LOGI(TAG, "library loaded: internal RAM %u bytes, PSRAM %u bytes",
+                                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+                    }
                 }
                 ui_show_message(NULL);
             }

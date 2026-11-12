@@ -122,6 +122,8 @@ void config_init(void)
         if (nvs_get_u16(h, "browse_back", &wide) == ESP_OK) s_cfg->browse_return_s = wide;
         if (nvs_get_u8(h, "speed_pct", &v) == ESP_OK) s_cfg->playback_speed_pct = v;
         if (nvs_get_u8(h, "sort_mode", &v) == ESP_OK) s_cfg->library_sort_mode = v;
+        if (nvs_get_u8(h, "series_sort", &v) == ESP_OK) s_cfg->series_sort_mode = v;
+        if (nvs_get_u8(h, "author_sort", &v) == ESP_OK) s_cfg->author_sort_mode = v;
         if (nvs_get_u8(h, "sleep_min", &v) == ESP_OK) s_cfg->sleep_timer_minutes = v;
         if (nvs_get_u8(h, "sleep_on", &v) == ESP_OK) s_cfg->sleep_timer_enabled = v != 0;
         if (nvs_get_u8(h, "display", &v) == ESP_OK) s_cfg->display_type = v;
@@ -178,6 +180,8 @@ static void write_all(void *arg)
         nvs_set_u16(h, "hold_ds", (uint16_t)(s_cfg->knob_hold_s * 10.0f + 0.5f)),
         nvs_set_u8(h, "speed_pct", s_cfg->playback_speed_pct),
         nvs_set_u8(h, "sort_mode", s_cfg->library_sort_mode),
+        nvs_set_u8(h, "series_sort", s_cfg->series_sort_mode),
+        nvs_set_u8(h, "author_sort", s_cfg->author_sort_mode),
         nvs_set_u8(h, "sleep_min", s_cfg->sleep_timer_minutes),
         nvs_set_u8(h, "sleep_on", s_cfg->sleep_timer_enabled),
         nvs_set_u8(h, "display", s_cfg->display_type),
@@ -232,6 +236,8 @@ bool config_save(const app_config_t *cfg)
     if (s_cfg->playback_speed_pct != 125 && s_cfg->playback_speed_pct != 150 &&
         s_cfg->playback_speed_pct != 200) s_cfg->playback_speed_pct = 100;
     if (s_cfg->library_sort_mode > 1) s_cfg->library_sort_mode = 0;
+    if (s_cfg->series_sort_mode > 1) s_cfg->series_sort_mode = 0;
+    if (s_cfg->author_sort_mode > 1) s_cfg->author_sort_mode = 0;
     if (s_cfg->sleep_timer_minutes < 1) s_cfg->sleep_timer_minutes = 1;
     if (s_cfg->sleep_timer_minutes > 240) s_cfg->sleep_timer_minutes = 240;
     if (s_cfg->display_type > CHAPTER_DISPLAY_SSD1306) s_cfg->display_type = CHAPTER_DISPLAY_SH1122;

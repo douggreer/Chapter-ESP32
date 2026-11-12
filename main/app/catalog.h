@@ -29,6 +29,8 @@ void catalog_dir(char *out, size_t len);
 bool catalog_load_cached(void);
 // Fetches the library list and the selected library's items from the server and shows them.
 bool catalog_load_network(bool quiet);
+// Refresh account progress only, without downloading or rebuilding the library catalog.
+bool catalog_refresh_progress(void);
 // Makes another library the selected one (saved); the caller then loads it.
 void catalog_select(const char *library_id);
 typedef struct {

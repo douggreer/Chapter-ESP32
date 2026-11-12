@@ -28,6 +28,8 @@ typedef struct {
     int browse_return_s;
     int playback_speed_pct; // 100, 125, 150, or 200
     uint8_t library_sort_mode; // 0=title, 1=author
+    uint8_t series_sort_mode; // 0=alphabetical, 1=most books first
+    uint8_t author_sort_mode; // 0=alphabetical, 1=most books first
     uint8_t sleep_timer_minutes;
     bool sleep_timer_enabled;
     uint8_t display_type; // chapter_display_type_t; changing it requires a restart

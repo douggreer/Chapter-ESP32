@@ -89,6 +89,8 @@ esp_err_t abs_parse_libraries(const char *json, abs_library_t **out, int *count)
 // Items of one library, sorted A-Z by sort_title. Fetches small pages so a large library does not
 // require one huge response buffer.
 esp_err_t abs_get_books(const char *library_id, abs_book_t **out_books, int *out_count);
+// Refresh only the account listening progress for an already loaded catalog.
+esp_err_t abs_refresh_book_progress(abs_book_t *books, int count);
 // Name of the library being shown (for display), and the server host.
 const char *abs_library_name(void);
 void abs_set_library_name(const char *name);

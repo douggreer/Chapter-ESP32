@@ -534,3 +534,27 @@ bool catalog_load_network(bool quiet)
     xSemaphoreGive(s_catalog_lock);
     return true;
 }
+
+bool catalog_refresh_progress(void)
+{
+    if (!s_catalog_lock || !s_books_lock) return false;
+    xSemaphoreTake(s_catalog_lock, portMAX_DELAY);
+    if (s_account_switch_pending || !s_books || s_count <= 0) {
+        xSemaphoreGive(s_catalog_lock);
+        return false;
+    }
+
+    xSemaphoreTake(s_books_lock, portMAX_DELAY);
+    const esp_err_t err = abs_refresh_book_progress(s_books, s_count);
+    if (err == ESP_OK) {
+        // A downloaded book may have a newer locally saved position than the server.
+        download_sync_progress(s_books, s_count, false);
+        ui_progress_updated(s_books, s_count);
+        ESP_LOGI(TAG, "refreshed listening progress for %d cached books", s_count);
+    } else {
+        ESP_LOGW(TAG, "could not refresh listening progress: %s", esp_err_to_name(err));
+    }
+    xSemaphoreGive(s_books_lock);
+    xSemaphoreGive(s_catalog_lock);
+    return err == ESP_OK;
+}

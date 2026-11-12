@@ -1054,6 +1054,25 @@ esp_err_t abs_get_books(const char *library_id, abs_book_t **out_books, int *out
     return ESP_OK;
 }
 
+esp_err_t abs_refresh_book_progress(abs_book_t *books, int count)
+{
+    if (!books || count <= 0) return ESP_ERR_INVALID_ARG;
+
+    char *me_json = NULL;
+    if (request(HTTP_METHOD_GET, "/api/me", NULL, &me_json) != 200 || !me_json) {
+        free(me_json);
+        return ESP_FAIL;
+    }
+
+    abs_progress_entry_t *progress = NULL;
+    int progress_count = 0;
+    esp_err_t err = parse_progress(me_json, &progress, &progress_count);
+    free(me_json);
+    if (err == ESP_OK) err = apply_progress(books, count, progress, progress_count);
+    free(progress);
+    return err;
+}
+
 /* ---------- podcast episodes ---------- */
 
 static int episode_cmp(const void *pa, const void *pb)

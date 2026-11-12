@@ -87,6 +87,7 @@ static bool s_shutdown_requested;
 static bool s_from_cache;
 static bool s_setup_mode;
 static bool s_startup_resume_done;
+static volatile bool s_settings_refresh_requested;
 static uint32_t s_library_revision;
 static portMUX_TYPE s_message_lock = portMUX_INITIALIZER_UNLOCKED;
 static uint32_t s_last_render_ms;
@@ -373,12 +374,18 @@ static int group_ref_cmp(const void *pa, const void *pb)
 static int group_series_cmp(const void *pa, const void *pb)
 {
     const group_entry_t *a = pa, *b = pb;
+    if (config_get()->series_sort_mode == 1 && a->count != b->count) {
+        return a->count > b->count ? -1 : 1;
+    }
     return strcasecmp(a->name, b->name);
 }
 
 static int group_author_cmp(const void *pa, const void *pb)
 {
     const group_entry_t *a = pa, *b = pb;
+    if (config_get()->author_sort_mode == 1 && a->count != b->count) {
+        return a->count > b->count ? -1 : 1;
+    }
     return author_sort_compare(a->name, b->name);
 }
 
@@ -1255,6 +1262,25 @@ void ui_process(void)
     handle_knobs();
     update_sleep_timer(esp_timer_get_time());
     const app_config_t *cfg = config_get();
+    if (s_settings_refresh_requested) {
+        s_settings_refresh_requested = false;
+        char previous_group[128] = "";
+        if (s_screen == UI_GROUPS && s_group_selection >= 0 && s_group_selection < s_group_count) {
+            strlcpy(previous_group, s_groups[s_group_selection].name, sizeof(previous_group));
+            build_groups(s_group_kind);
+            const int found = find_group(previous_group);
+            s_group_selection = found >= 0 ? found : 0;
+        } else if (s_screen == UI_BOOKS) {
+            if (s_list_kind != LIST_TITLE && s_selected_group >= 0 && s_selected_group < s_group_count) {
+                strlcpy(previous_group, s_groups[s_selected_group].name, sizeof(previous_group));
+                build_groups(s_group_kind);
+                s_selected_group = find_group(previous_group);
+                if (s_selected_group < 0 && s_group_count > 0) s_selected_group = 0;
+            }
+            build_visible_items();
+        }
+        s_dirty = true;
+    }
     if (cfg->browse_return_s > 0 && s_screen != UI_PLAYER && s_last_user_action_us &&
         esp_timer_get_time() - s_last_user_action_us >= (int64_t)cfg->browse_return_s * 1000000LL) {
         player_status_t state;
@@ -1395,6 +1421,21 @@ void ui_set_books(const abs_book_t *books, int count)
     s_dirty = true;
 }
 
+void ui_progress_updated(const abs_book_t *books, int count)
+{
+    s_books = books;
+    s_book_count = count > UI_MAX_BOOKS ? UI_MAX_BOOKS : count;
+    s_audiobook_count = 0;
+    s_in_progress_count = 0;
+    for (int i = 0; books && i < count; ++i) {
+        if (books[i].podcast) continue;
+        ++s_audiobook_count;
+        if (book_in_progress(&books[i])) ++s_in_progress_count;
+    }
+    if (s_screen == UI_CONTINUE) build_continue_items();
+    s_dirty = true;
+}
+
 void ui_set_source(bool from_cache)
 {
     s_from_cache = from_cache;
@@ -1404,6 +1445,11 @@ void ui_set_catalog_refreshing(bool refreshing)
 {
     s_catalog_refreshing = refreshing;
     s_dirty = true;
+}
+
+void ui_settings_changed(void)
+{
+    s_settings_refresh_requested = true;
 }
 
 void ui_get_source(uint32_t *library_revision, bool *from_cache)
