@@ -173,7 +173,9 @@ static int request_once(esp_http_client_method_t method, const char *path, const
         if (out_len) *out_len = len;
         if (out) *out = buf; else free(buf);
     } else {
-        ESP_LOGE(TAG, "%s: out of memory reading response", path);
+        ESP_LOGE(TAG, "%s: out of memory reading response (PSRAM free %u, largest block %u)",
+                 path, (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
         status = -1;
     }
     if (status != 200) {

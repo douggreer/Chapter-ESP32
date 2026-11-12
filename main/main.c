@@ -18,9 +18,16 @@
 #include "ui.h"
 #include "wifi.h"
 
-#define RETRY_US (60 * 1000000LL)
+#define RETRY_INITIAL_US (60 * 1000000LL)
+#define RETRY_MAX_US (5 * 60 * 1000000LL)
 
 static const char *TAG = "chapter_main";
+
+static int64_t retry_delay_after(bool success, int64_t current)
+{
+    if (success) return RETRY_INITIAL_US;
+    return current >= RETRY_MAX_US / 2 ? RETRY_MAX_US : current * 2;
+}
 
 static void initialize_nvs(void)
 {
@@ -62,16 +69,18 @@ void app_main(void)
     bool online = false;
     bool first_network_load = true;
     bool signed_out_notice = false;
-    int64_t last_try = -RETRY_US;
+    int64_t retry_interval_us = RETRY_INITIAL_US;
+    int64_t last_try = -RETRY_INITIAL_US;
     const int64_t started = esp_timer_get_time();
 
     for (;;) {
         const int64_t now = esp_timer_get_time();
-        if (config_complete() && !online && wifi_is_connected() && now - last_try >= RETRY_US) {
+        if (config_complete() && !online && wifi_is_connected() && now - last_try >= retry_interval_us) {
             // Keep the cached menu visible and usable while it refreshes.
             if (!cached) ui_show_message("Loading Audiobookshelf library...");
             online = catalog_load_network(cached);
             last_try = esp_timer_get_time();
+            retry_interval_us = retry_delay_after(online, retry_interval_us);
             if (online) {
                 if (first_network_load) {
                     first_network_load = false;
@@ -95,6 +104,7 @@ void app_main(void)
             if (wifi_is_connected()) {
                 online = catalog_load_network(cached);
                 last_try = esp_timer_get_time();
+                retry_interval_us = retry_delay_after(online, RETRY_INITIAL_US);
             } else if (!cached) {
                 catalog_select(previous);
                 ui_show_message("That library is not cached.\nConnect to Wi-Fi first.");
@@ -103,8 +113,10 @@ void app_main(void)
 
         if (ui_take_refresh_request()) {
             if (wifi_is_connected()) {
+                retry_interval_us = RETRY_INITIAL_US;
                 online = catalog_load_network(false);
                 last_try = esp_timer_get_time();
+                retry_interval_us = retry_delay_after(online, retry_interval_us);
                 if (online) ui_show_message(NULL);
             } else {
                 ui_show_message("Offline - showing saved library");

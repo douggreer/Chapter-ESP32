@@ -7,7 +7,7 @@
 #include <stdint.h>
 #include "esp_err.h"
 
-#define ABS_BOOK_PAGE_SIZE 250
+#define ABS_BOOK_PAGE_SIZE 100
 #define ABS_MAX_LIBRARY_BOOKS 7000
 
 typedef struct {
