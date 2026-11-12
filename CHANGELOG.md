@@ -43,6 +43,7 @@ This is a project-level summary of the work done to create and refine the ESP32-
 - Reduced Audiobookshelf item response batches to 100, refreshes one full catalog at a time to avoid duplicating large caches in PSRAM while keeping root navigation active, compacted each in-memory book record, removed repeated group sorting from root-menu redraws, and added clearer failure diagnostics.
 - Added independent Series and Author group sorting choices: alphabetical or largest book count first, with alphabetical tie-breaking. The choices apply to the OLED navigation and portal browser.
 - Changed deep-sleep wake to keep the cached catalog and refresh only Audiobookshelf progress for Continue Listening. Full metadata refresh still runs after a normal restart or when requested with the portal's manual refresh action.
+- Reduced the setup portal's simultaneous client limit to leave LWIP sockets available for Audiobookshelf sign-in, progress sync, and playback; added connection failure diagnostics for internal RAM and socket errors.
 
 ## Current known limits
 

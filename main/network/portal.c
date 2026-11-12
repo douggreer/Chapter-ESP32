@@ -609,6 +609,9 @@ static esp_err_t start_http_server(void)
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.task_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
     cfg.stack_size = 6144;
+    // Keep room in LWIP's 10-socket table for ABS requests, playback streaming, and progress sync.
+    // HTTPD also reserves three internal sockets; its default seven clients can consume the table.
+    cfg.max_open_sockets = 4;
     cfg.max_uri_handlers = 16;
     cfg.uri_match_fn = httpd_uri_match_wildcard;
     cfg.lru_purge_enable = true;

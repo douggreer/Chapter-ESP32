@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <errno.h>
 #include "cJSON.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -1385,7 +1386,8 @@ static int raw_request(const char *base, esp_http_client_method_t method, const 
     int len = body ? strlen(body) : 0;
     if (body) esp_http_client_set_header(c, "Content-Type", "application/json");
     int status = -1;
-    if (esp_http_client_open(c, len) == ESP_OK && (!len || esp_http_client_write(c, body, len) == len) &&
+    const esp_err_t open_err = esp_http_client_open(c, len);
+    if (open_err == ESP_OK && (!len || esp_http_client_write(c, body, len) == len) &&
         esp_http_client_fetch_headers(c) >= 0) {
         status = esp_http_client_get_status_code(c);
         size_t cap = 8192, n = 0;
@@ -1402,6 +1404,11 @@ static int raw_request(const char *base, esp_http_client_method_t method, const 
         }
         if (buf) buf[n] = 0;
         *out = buf;
+    } else if (open_err != ESP_OK) {
+        ESP_LOGW(TAG, "%s: connection open failed: %s (errno %d, internal RAM free %u, largest block %u)",
+                 path, esp_err_to_name(open_err), errno,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
     }
     esp_http_client_cleanup(c);
     free(hdr);
