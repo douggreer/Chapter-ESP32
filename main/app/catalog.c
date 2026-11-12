@@ -498,7 +498,7 @@ bool catalog_load_network(bool quiet)
         show(NULL, 0, false);
         ESP_LOGI(TAG, "released %d cached books for refresh; PSRAM free %u",
                  released, (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-        ui_show_message("Refreshing Audiobookshelf library...");
+        ui_set_catalog_refreshing(true);
     }
     abs_set_work_callback(pump_catalog_ui);
     const esp_err_t fetch_error = abs_get_books(s_library, &fresh, &n);
@@ -513,9 +513,13 @@ bool catalog_load_network(bool quiet)
             download_sync_progress(cached_books, cached_count, false);
             show(cached_books, cached_count, true);
             ESP_LOGI(TAG, "restored %d cached books after refresh failed", cached_count);
+            ui_set_catalog_refreshing(false);
             ui_show_message(NULL);
         } else if (!quiet) {
+            ui_set_catalog_refreshing(false);
             ui_show_message_locked("Couldn't load the library.\nTry Refresh in Settings.");
+        } else {
+            ui_set_catalog_refreshing(false);
         }
         xSemaphoreGive(s_catalog_lock);
         return false;
@@ -525,6 +529,7 @@ bool catalog_load_network(bool quiet)
     if (dir[0] && !finish_book_cache(&writer, fresh, n)) {
         ESP_LOGW(TAG, "library loaded, but the refreshed offline cache was not committed");
     }
+    ui_set_catalog_refreshing(false);
     ui_show_message(NULL);
     xSemaphoreGive(s_catalog_lock);
     return true;

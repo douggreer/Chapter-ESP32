@@ -14,6 +14,7 @@ void ui_toggle_play(void);
 void ui_show_player(void);
 void ui_set_books(const abs_book_t *books, int count);
 void ui_set_source(bool from_cache);
+void ui_set_catalog_refreshing(bool refreshing);
 void ui_get_source(uint32_t *library_revision, bool *from_cache);
 void ui_set_libraries(const abs_library_t *libraries, int count, const char *selected_id);
 void ui_request_library(const char *library_id);

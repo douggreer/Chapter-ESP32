@@ -78,6 +78,7 @@ static int s_selected_group = -1;
 static group_kind_t s_group_kind;
 static list_kind_t s_list_kind = LIST_TITLE;
 static bool s_dirty = true;
+static bool s_catalog_refreshing;
 static char s_message[192];
 static bool s_message_pending;
 static char s_library_request[40];
@@ -1094,6 +1095,9 @@ static void render_screen(void)
     case UI_MESSAGE:
     case UI_SETUP: break;
     }
+    if (s_screen == UI_ROOT && s_catalog_refreshing) {
+        strlcpy(line2, "Refreshing library...", sizeof(line2));
+    }
     const bool compact_display = screen_width() <= 128;
     const int footer_label = compact_display ? 3 : 2;
     if (compact_display) {
@@ -1394,6 +1398,12 @@ void ui_set_books(const abs_book_t *books, int count)
 void ui_set_source(bool from_cache)
 {
     s_from_cache = from_cache;
+}
+
+void ui_set_catalog_refreshing(bool refreshing)
+{
+    s_catalog_refreshing = refreshing;
+    s_dirty = true;
 }
 
 void ui_get_source(uint32_t *library_revision, bool *from_cache)
