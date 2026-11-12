@@ -11,27 +11,25 @@
 #define ABS_MAX_LIBRARY_BOOKS 7000
 
 typedef struct {
-    char id[40];
     char *title;
     char *sort_title;      // title without a leading "The"/"A" (server-provided), for A-Z
     char *author;          // may list several authors separated by ", "
     char *authors[6];      // normalized author names for Browse by Author
-    uint8_t author_count;
-    char series_id[40];    // primary series only; the library series endpoint canonicalizes it
-    char series_name[128];
-    char series_sequence[24];
-    int series_total;
-    double duration;
-    double current_time;   // saved progress, seconds
+    char *resume_episode;
+    char id[40];
+    char series_name[52];
+    char series_sequence[8];
+    uint32_t series_id_hash; // temporary hash used to canonicalize primary series while loading
+    uint16_t series_total;
+    float duration;
+    float current_time;    // saved progress, seconds
     float progress;        // 0..1
-    bool finished;
     double last_update;    // progress timestamp (ms), 0 if never played
-    double added_at;       // when the item was added to the library (ms)
+    uint8_t author_count;
+    bool finished;
     // Podcast libraries: each item is a show. Progress fields then describe the most recently
-    // played unfinished episode, which resume_episode names.
+    // played unfinished episode, which resume_episode names. Allocated only for podcast items.
     bool podcast;
-    int num_episodes;
-    char resume_episode[40];
 } abs_book_t;
 
 typedef void (*abs_work_callback_t)(void);

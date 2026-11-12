@@ -793,7 +793,7 @@ void player_open(const abs_book_t *book)
     c.restart_from_start = book->finished;
     if (book->podcast) {
         // Shows play an episode: carry on with the latest one (the UI picks others explicitly).
-        strlcpy(c.episode_id, book->resume_episode, sizeof(c.episode_id));
+        strlcpy(c.episode_id, book->resume_episode ? book->resume_episode : "", sizeof(c.episode_id));
         if (!c.episode_id[0]) return;
     }
     xQueueSend(s_cmds, &c, 0);
