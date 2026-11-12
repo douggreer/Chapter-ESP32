@@ -486,6 +486,8 @@ bool catalog_load_network(bool quiet)
     const esp_err_t fetch_error = abs_get_books(s_library, &fresh, &n);
     abs_set_work_callback(NULL);
     if (fetch_error != ESP_OK) {
+        ESP_LOGW(TAG, "Audiobookshelf catalog fetch stopped: %s after %d books",
+                 esp_err_to_name(fetch_error), n);
         abs_free_books(fresh, n);
         if (!quiet) ui_show_message_locked("Couldn't load the library.\nTry Refresh in Settings.");
         xSemaphoreGive(s_catalog_lock);

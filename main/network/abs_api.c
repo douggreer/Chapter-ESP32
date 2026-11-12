@@ -512,16 +512,24 @@ esp_err_t abs_append_books(abs_book_t **books, int *count, int *capacity, abs_bo
     }
     const int needed = *count + page_count;
     if (needed > *capacity) {
-        int next = *capacity ? *capacity : ABS_BOOK_PAGE_SIZE;
+        // Avoid a large doubling allocation at the 3,200-book boundary (3,200 -> 6,400).
+        // Reallocating a multi-megabyte PSRAM block while the cached catalog is still live can
+        // fail even though the final catalog itself fits. Grow by at least four API pages instead.
+        int next = *capacity ? *capacity : ABS_BOOK_PAGE_SIZE * 4;
         while (next < needed) {
-            if (next >= ABS_MAX_LIBRARY_BOOKS / 2) {
-                next = ABS_MAX_LIBRARY_BOOKS;
-                break;
-            }
-            next *= 2;
+            const int growth = next / 4 > ABS_BOOK_PAGE_SIZE * 4
+                                   ? next / 4 : ABS_BOOK_PAGE_SIZE * 4;
+            next = next > ABS_MAX_LIBRARY_BOOKS - growth ? ABS_MAX_LIBRARY_BOOKS : next + growth;
         }
         abs_book_t *grown = heap_caps_realloc(*books, (size_t)next * sizeof(**books), MALLOC_CAP_SPIRAM);
-        if (!grown) return ESP_ERR_NO_MEM;
+        if (!grown) {
+            ESP_LOGE(TAG,
+                     "could not grow catalog from %d to %d books (%u bytes); PSRAM free %u, largest block %u",
+                     *capacity, next, (unsigned)((size_t)next * sizeof(**books)),
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+            return ESP_ERR_NO_MEM;
+        }
         *books = grown;
         *capacity = next;
     }

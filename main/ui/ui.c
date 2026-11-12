@@ -59,6 +59,8 @@ static uint8_t *s_lvgl_buffer;
 static bool s_ready;
 static const abs_book_t *s_books;
 static int s_book_count;
+static int s_audiobook_count;
+static int s_in_progress_count;
 static int *s_visible;
 static int s_visible_count;
 static group_entry_t *s_groups;
@@ -1010,19 +1012,14 @@ static void render_screen(void)
         const int id = root_item_at(s_root_selection);
         snprintf(line1, sizeof(line1), "%s", s_root_items[id]);
         if (id == 0) {
-            int in_progress = 0;
-            for (int i = 0; i < s_book_count; ++i) if (!s_books[i].podcast && book_in_progress(&s_books[i])) ++in_progress;
-            snprintf(line2, sizeof(line2), "%d book%s in progress", in_progress, in_progress == 1 ? "" : "s");
+            snprintf(line2, sizeof(line2), "%d book%s in progress", s_in_progress_count,
+                     s_in_progress_count == 1 ? "" : "s");
         } else if (id == 1) {
-            build_groups(GROUP_SERIES);
-            snprintf(line2, sizeof(line2), "%d series", s_group_count);
+            strlcpy(line2, "Select to browse series", sizeof(line2));
         } else if (id == 2) {
-            int books = 0;
-            for (int i = 0; i < s_book_count; ++i) if (!s_books[i].podcast) ++books;
-            snprintf(line2, sizeof(line2), "%d books", books);
+            snprintf(line2, sizeof(line2), "%d books", s_audiobook_count);
         } else if (id == 3) {
-            build_groups(GROUP_AUTHOR);
-            snprintf(line2, sizeof(line2), "%d authors", s_group_count);
+            strlcpy(line2, "Select to browse authors", sizeof(line2));
         } else if (id == 5) {
             strlcpy(line2, "to turn off device", sizeof(line2));
         }
@@ -1318,6 +1315,15 @@ void ui_show_player(void)
 
 void ui_set_books(const abs_book_t *books, int count)
 {
+    s_audiobook_count = 0;
+    s_in_progress_count = 0;
+    if (books) {
+        for (int i = 0; i < count; ++i) {
+            if (books[i].podcast) continue;
+            ++s_audiobook_count;
+            if (book_in_progress(&books[i])) ++s_in_progress_count;
+        }
+    }
     if (!s_visible) {
         s_books = books;
         s_book_count = count > UI_MAX_BOOKS ? UI_MAX_BOOKS : count;
